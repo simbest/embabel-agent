@@ -17,8 +17,9 @@ package com.embabel.common.ai.converters.streaming
 
 import com.embabel.common.core.streaming.StreamingEvent
 import com.embabel.common.core.streaming.ThinkingState
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import tools.jackson.module.kotlin.jacksonObjectMapper
 import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 
 class StreamingJacksonOutputConverterTest {
@@ -71,7 +72,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStream("")
 
         // Then
-        val items = result.collectList().block()
+        val items = result.collectList().block()!!
         assertNotNull(items)
         assertTrue(items!!.isEmpty())
     }
@@ -91,7 +92,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStream(jsonlWithBlanks)
 
         // Then
-        val items = result.collectList().block()
+        val items = result.collectList().block()!!
         assertNotNull(items)
         assertEquals(2, items!!.size)
     }
@@ -109,7 +110,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStream(validJsonl)
 
         // Then
-        val items = result.collectList().block()
+        val items = result.collectList().block()!!
         assertNotNull(items)
         assertEquals(2, items!!.size)
         assertEquals("test1", items[0].name)
@@ -129,7 +130,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(mixedContent)
 
         // Then
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
         assertEquals(2, events!!.size)
 
@@ -154,7 +155,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(content)
 
         // Then
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
         assertEquals(3, events!!.size) // 2 thinking + 1 object
     }
@@ -169,7 +170,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(thinkingLine)
 
         // Then
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
         assertEquals(1, events!!.size)
 
@@ -187,7 +188,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(legacyThinkingLine)
 
         // Then
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
         assertEquals(1, events!!.size)
 
@@ -205,7 +206,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(objectLine)
 
         // Then
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
         assertEquals(1, events!!.size)
 
@@ -223,7 +224,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStream(invalidJson)
 
         // Then - no objects should be emitted (malformed JSON becomes thinking which is filtered)
-        val items = result.collectList().block()
+        val items = result.collectList().block()!!
         assertNotNull(items)
         assertTrue(items!!.isEmpty())
     }
@@ -241,7 +242,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(mixedContent)
 
         // Then - should get 2 thinking events: explicit + continuation
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
         assertEquals(2, events!!.size)
 
@@ -262,7 +263,7 @@ class StreamingJacksonOutputConverterTest {
         )
 
         // When
-        val schema = converter.jsonSchema
+        val schema = converter.getJsonSchema()
 
         // Then
         assertTrue(schema.contains("name"))
@@ -290,7 +291,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStream(jsonlInput)
 
         // Then
-        val people = result.collectList().block()
+        val people = result.collectList().block()!!
         assertNotNull(people)
         assertEquals(2, people!!.size)
 
@@ -357,7 +358,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStream(validJsonl)
 
         // Then
-        val items = result.collectList().block()
+        val items = result.collectList().block()!!
         assertNotNull(items)
         assertEquals(2, items!!.size)
         assertEquals("test1", items[0].name)
@@ -443,7 +444,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(multiLineContent)
 
         // Then - should get 4 thinking events + 1 object
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
 
 
@@ -494,7 +495,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(mixedStatesContent)
 
         // Then
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
 
 
@@ -531,7 +532,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(mixedContent)
 
         // Then
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
 
         val objectEvents = events!!.filterIsInstance<StreamingEvent.Object<*>>()
@@ -568,7 +569,7 @@ class StreamingJacksonOutputConverterTest {
         val result = converter.convertStreamWithThinking(allFormatsContent)
 
         // Then
-        val events = result.collectList().block()
+        val events = result.collectList().block()!!
         assertNotNull(events)
         assertEquals(5, events!!.size)
 
@@ -580,5 +581,71 @@ class StreamingJacksonOutputConverterTest {
         assertEquals("llama format", thinkingEvents[2].content)
         assertEquals("xml reasoning format", thinkingEvents[3].content)
         assertEquals("legacy format", thinkingEvents[4].content)
+    }
+
+    @Nested
+    inner class FenceFilter {
+
+        private val converter = StreamingJacksonOutputConverter(SimpleItem::class.java, objectMapper)
+
+        @Test
+        fun `drops backtick-json fence marker`() {
+            val result = converter.convertStreamWithThinking("```json").collectList().block()
+            assertNotNull(result)
+            assertTrue(result!!.isEmpty(), "Standalone ```json line must produce no events")
+        }
+
+        @Test
+        fun `drops bare backtick fence marker`() {
+            val result = converter.convertStreamWithThinking("```").collectList().block()
+            assertNotNull(result)
+            assertTrue(result!!.isEmpty(), "Standalone ``` line must produce no events")
+        }
+
+        @Test
+        fun `drops backtick-python fence marker`() {
+            val result = converter.convertStreamWithThinking("```python").collectList().block()
+            assertNotNull(result)
+            assertTrue(result!!.isEmpty(), "Standalone ```python line must produce no events")
+        }
+
+        @Test
+        fun `keeps fence marker with content on same line`() {
+            val result = converter.convertStreamWithThinking("```python def foo(): pass").collectList().block()
+            assertNotNull(result)
+            assertEquals(1, result!!.size, "Fence with trailing content should be kept as reasoning")
+            assertTrue(result[0] is StreamingEvent.Thinking)
+        }
+
+        @Test
+        fun `keeps normal reasoning text`() {
+            val result = converter.convertStreamWithThinking("This is normal reasoning text").collectList().block()
+            assertNotNull(result)
+            assertEquals(1, result!!.size, "Normal reasoning text must not be filtered")
+            assertTrue(result[0] is StreamingEvent.Thinking)
+            assertEquals("This is normal reasoning text", (result[0] as StreamingEvent.Thinking).content)
+        }
+
+        @Test
+        fun `drops fence between thinking block and JSON`() {
+            val content = "<think>reasoning here</think>\n```json\n{\"name\": \"result\"}"
+            val events = converter.convertStreamWithThinking(content).collectList().block()
+            assertNotNull(events)
+            assertEquals(2, events!!.size, "Should have 1 thinking + 1 object; fence must be dropped")
+            assertTrue(events[0] is StreamingEvent.Thinking)
+            assertEquals("reasoning here", (events[0] as StreamingEvent.Thinking).content)
+            assertTrue(events[1] is StreamingEvent.Object<*>)
+            assertEquals("result", (events[1] as StreamingEvent.Object<SimpleItem>).item.name)
+        }
+
+        @Test
+        fun `drops closing fence after JSON`() {
+            val content = "```json\n{\"name\": \"item\"}\n```"
+            val events = converter.convertStreamWithThinking(content).collectList().block()
+            assertNotNull(events)
+            assertEquals(1, events!!.size, "Only the JSON object should survive; both fences must be dropped")
+            assertTrue(events[0] is StreamingEvent.Object<*>)
+            assertEquals("item", (events[0] as StreamingEvent.Object<SimpleItem>).item.name)
+        }
     }
 }

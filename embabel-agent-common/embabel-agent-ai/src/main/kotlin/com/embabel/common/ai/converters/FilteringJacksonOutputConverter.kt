@@ -15,7 +15,7 @@
  */
 package com.embabel.common.ai.converters
 
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import com.github.victools.jsonschema.generator.SchemaGeneratorConfigBuilder
 import org.springframework.core.ParameterizedTypeReference
 import java.lang.reflect.Field
@@ -25,23 +25,26 @@ import java.util.function.Predicate
 /**
  * Extension of [JacksonOutputConverter] that allows for filtering of properties of the generated object via a predicate.
  */
-open class FilteringJacksonOutputConverter<T> internal constructor(
+open class FilteringJacksonOutputConverter<T : Any> internal constructor(
     type: Type,
     objectMapper: ObjectMapper,
     private val fieldFilter: Predicate<Field>,
-) : JacksonOutputConverter<T>(type, objectMapper) {
+    requiredFieldNormalization: RequiredFieldNormalization = RequiredFieldNormalization.ENABLED,
+) : JacksonOutputConverter<T>(type, objectMapper, requiredFieldNormalization) {
 
     constructor(
         clazz: Class<T>,
         objectMapper: ObjectMapper,
         fieldFilter: Predicate<Field>,
-    ) : this(clazz as Type, objectMapper, fieldFilter)
+        requiredFieldNormalization: RequiredFieldNormalization = RequiredFieldNormalization.ENABLED,
+    ) : this(clazz as Type, objectMapper, fieldFilter, requiredFieldNormalization)
 
     constructor(
         typeReference: ParameterizedTypeReference<T>,
         objectMapper: ObjectMapper,
         fieldFilter: Predicate<Field>,
-    ) : this(typeReference.type, objectMapper, fieldFilter)
+        requiredFieldNormalization: RequiredFieldNormalization = RequiredFieldNormalization.ENABLED,
+    ) : this(typeReference.type, objectMapper, fieldFilter, requiredFieldNormalization)
 
     override fun schemaGeneratorConfigBuilder(): SchemaGeneratorConfigBuilder {
         val configBuilder = super.schemaGeneratorConfigBuilder()

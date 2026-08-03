@@ -1,16 +1,12 @@
 name: Sync Primary To Upgrade
 
 on:
-  push:
-    branches: [main]
-  schedule:
-    - cron: "0 6 * * *"
+  # push:
+  #  branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: read
+  contents: read
 
 concurrency:
   group: sync-primary-to-upgrade
@@ -18,7 +14,12 @@ concurrency:
 
 jobs:
   sync:
+    name: Sync primary to upgrade
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: read
 
     steps:
       - name: Checkout repository
@@ -26,6 +27,11 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.PAT_TOKEN || github.token }}
+      - name: Configure git identity
+        run: |
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
 
       - name: Resolve source PR metadata
         id: source
@@ -74,12 +80,20 @@ jobs:
           PR_NUMBER: ${{ steps.source.outputs.pr_number }}
           DEVELOPER_GITHUB_LOGIN: ${{ steps.source.outputs.pr_author }}
         run: |
-          mkdir -p .github/sync-reports
-          .github/scripts/sync-primary-to-upgrade.sh \
-            --conflict-file .github/sync-reports/conflicted-files.txt \
-            --report-file .github/sync-reports/branch-sync-conflict.md \
-            --create-issue \
-            --issue-assignee "${DEVELOPER_GITHUB_LOGIN}"
+            mkdir -p .github/sync-reports
+
+            args=(
+              --conflict-file .github/sync-reports/conflicted-files.txt
+              --report-file .github/sync-reports/branch-sync-conflict.md
+              --create-issue
+            )
+
+            if [ -n "${DEVELOPER_GITHUB_LOGIN}" ]; then
+              args+=(--issue-assignee "${DEVELOPER_GITHUB_LOGIN}")
+            fi
+
+            .github/scripts/sync-primary-to-upgrade.sh "${args[@]}"
+
 
       - name: Upload conflict report
         if: failure()
@@ -90,9 +104,12 @@ jobs:
           if-no-files-found: ignore
 
   notify:
+    name: Notify branch sync failure
     needs: [sync]
     if: failure()
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Notify Discord
@@ -104,12 +121,14 @@ jobs:
             exit 0
           fi
 
-          payload=$(
-            jq -n \
-              --arg content "Branch sync failed: ${GITHUB_REPOSITORY} (${GITHUB_REF_NAME})
-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-              '{content: $content}'
-          )
+          message="$(printf 'Branch sync failed: %s (%s)\n%s/%s/actions/runs/%s' \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_REF_NAME}" \
+            "${GITHUB_SERVER_URL}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_RUN_ID}")"
+
+          payload="$(jq -n --arg content "${message}" '{content: $content}')"
 
           curl -fsS \
             -H "Content-Type: application/json" \

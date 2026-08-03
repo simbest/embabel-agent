@@ -16,14 +16,17 @@
 package com.embabel.agent.config.models.deepseek
 
 import com.embabel.agent.api.models.DeepSeekModels
+import com.embabel.agent.config.models.deepseek.DeepSeekProperties.Companion.PREFIX
 import com.embabel.agent.spi.common.RetryProperties
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
+import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.ai.model.OptionsConverter
 import com.embabel.common.ai.model.PerTokenPricingModel
 import com.embabel.common.util.ExcludeFromJacocoGeneratedReport
 import io.micrometer.observation.ObservationRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.ai.deepseek.DeepSeekChatModel
+import org.springframework.ai.chat.prompt.ChatOptions
 import org.springframework.ai.deepseek.DeepSeekChatOptions
 import org.springframework.ai.deepseek.api.DeepSeekApi
 import org.springframework.ai.model.tool.ToolCallingManager
@@ -43,7 +46,7 @@ import java.time.LocalDate
  * "embabel.agent.platform.models.deepseek" and control retry behavior
  * when calling Deepseek APIs.
  */
-@ConfigurationProperties(prefix = "embabel.agent.platform.models.deepseek")
+@ConfigurationProperties(prefix = PREFIX)
 class DeepSeekProperties : RetryProperties {
     /**
      * Base URL for DeepSeek API requests.
@@ -74,6 +77,11 @@ class DeepSeekProperties : RetryProperties {
      * Maximum backoff interval (in milliseconds).
      */
     override var backoffMaxInterval: Long = 60000L
+
+    override val propertyPrefix: String = PREFIX
+    companion object {
+        const val PREFIX  = "embabel.agent.platform.models.deepseek"
+    }
 }
 
 /**
@@ -109,12 +117,12 @@ class DeepSeekModelsConfig(
             knowledgeCutoffDate = LocalDate.of(2025, 8, 21),
         )
             // https://api-docs.deepseek.com/quick_start/pricing
-            // 1M Input tokens Cache hit $0.07
-            // 1M Input tokens Cache miss $0.56
+            // 1M Input tokens Cache hit $0.0028
+            // 1M Input tokens Cache miss $0.14
             .copy(
                 pricingModel = PerTokenPricingModel(
-                    usdPer1mInputTokens = 0.56,
-                    usdPer1mOutputTokens = 1.68,
+                    usdPer1mInputTokens = 0.14,
+                    usdPer1mOutputTokens = 0.28,
                 )
             )
     }
@@ -125,12 +133,42 @@ class DeepSeekModelsConfig(
         knowledgeCutoffDate = LocalDate.of(2025, 5, 28),
     )
         // https://api-docs.deepseek.com/quick_start/pricing
-        // 1M Input tokens Cache hit $0.07
-        // 1M Input tokens Cache miss $0.56
+        // 1M Input tokens Cache hit $0.0028
+        // 1M Input tokens Cache miss $0.14
         .copy(
             pricingModel = PerTokenPricingModel(
-                usdPer1mInputTokens = 0.56,
-                usdPer1mOutputTokens = 1.68,
+                usdPer1mInputTokens = 0.14,
+                usdPer1mOutputTokens = 0.28,
+            )
+        )
+
+    @Bean
+    fun deepSeekV4Flash(): SpringAiLlmService = deepSeekLlmOf(
+        DeepSeekModels.DEEPSEEK_V4_FLASH,
+        knowledgeCutoffDate = null,
+    )
+        // https://api-docs.deepseek.com/quick_start/pricing
+        // 1M Input tokens Cache hit $0.0028
+        // 1M Input tokens Cache miss $0.14
+        .copy(
+            pricingModel = PerTokenPricingModel(
+                usdPer1mInputTokens = 0.14,
+                usdPer1mOutputTokens = 0.28,
+            )
+        )
+
+    @Bean
+    fun deepSeekV4Pro(): SpringAiLlmService = deepSeekLlmOf(
+        DeepSeekModels.DEEPSEEK_V4_PRO,
+        knowledgeCutoffDate = null,
+    )
+        // https://api-docs.deepseek.com/quick_start/pricing
+        // 1M Input tokens Cache hit $0.003625
+        // 1M Input tokens Cache miss $0.435
+        .copy(
+            pricingModel = PerTokenPricingModel(
+                usdPer1mInputTokens = 0.435,
+                usdPer1mOutputTokens = 0.87,
             )
         )
 
@@ -146,13 +184,16 @@ class DeepSeekModelsConfig(
                     .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
                     .build()
             )
-            .defaultOptions(
+            .options(
                 DeepSeekChatOptions.builder()
                     .model(name)
                     .build()
             )
             .deepSeekApi(createDeepSeekApi())
-            .retryTemplate(properties.retryTemplate(name))
+            // Spring AI 2.0 builder now expects org.springframework.core.retry.RetryTemplate;
+            // we already wrap calls with spring-retry at the ChatClientLlmOperations layer,
+            // so the model-internal retry is redundant. Dropping the call falls back to
+            // Spring AI's default retry (no-op if not configured).
             .build()
         return SpringAiLlmService(
             name = name,
@@ -183,9 +224,10 @@ class DeepSeekModelsConfig(
     }
 }
 
-val DeepSeekOptionsConverter: OptionsConverter<DeepSeekChatOptions> =
-    OptionsConverter { options ->
+object DeepSeekOptionsConverter : OptionsConverter {
+    override fun convertOptions(options: LlmOptions, model: String): ChatOptions =
         DeepSeekChatOptions.builder()
+            .model(model)
             .frequencyPenalty(options.frequencyPenalty)
             .maxTokens(options.maxTokens)
             .presencePenalty(options.presencePenalty)
@@ -193,5 +235,5 @@ val DeepSeekOptionsConverter: OptionsConverter<DeepSeekChatOptions> =
             .topP(options.topP)
             .build()
 
-        // logprobs/topLogprobs/responseFormat
-    }
+    // logprobs/topLogprobs/responseFormat
+}

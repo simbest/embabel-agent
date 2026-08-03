@@ -16,9 +16,6 @@
 package com.embabel.agent.api.annotation.support
 
 import com.embabel.agent.api.annotation.*
-import com.embabel.agent.api.annotation.Action
-import com.embabel.agent.api.annotation.Agent
-import com.embabel.agent.api.annotation.Condition
 import com.embabel.agent.api.common.OperationContext
 import com.embabel.agent.api.common.PlannerType
 import com.embabel.agent.api.common.StuckHandler
@@ -38,8 +35,9 @@ import com.embabel.common.core.types.Semver
 import com.embabel.common.util.NameUtils
 import com.embabel.common.util.loggerFor
 import com.fasterxml.jackson.annotation.JsonTypeInfo
-import com.fasterxml.jackson.databind.annotation.JsonDeserialize
+import tools.jackson.databind.annotation.JsonDeserialize
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.cglib.proxy.Enhancer
 import org.springframework.stereotype.Service
 import org.springframework.util.ClassUtils
@@ -115,6 +113,8 @@ class AgentMetadataReader(
     agentStructureValidator: AgentStructureAgentValidator = AgentStructureAgentValidator.PERMIT_ALL,
     pathToCompletionValidator: PathToCompletionAgentValidator = GoapPathToCompletionValidator(),
     private val requireInterfaceDeserializationAnnotations: Boolean = false,
+    @Value("\${embabel.agent.platform.planner.restricted-goals:false}")
+    private val restrictedGoals: Boolean = false,
 ) {
 
     private val supervisorAgentFactory = SupervisorAgentFactory()
@@ -226,9 +226,9 @@ class AgentMetadataReader(
         }
 
         val agent = if (agenticInfo.agentAnnotation != null) {
+            val goalActions = actionMethods.filter { it.isAnnotationPresent(AchievesGoal::class.java) }
             if (plannerType == PlannerType.SUPERVISOR) {
                 // Find the goal action (the action with @AchievesGoal)
-                val goalActions = actionMethods.filter { it.isAnnotationPresent(AchievesGoal::class.java) }
                 if (goalActions.isEmpty()) {
                     logger.warn(
                         "SUPERVISOR planner requires at least one @AchievesGoal action on {}",
@@ -259,6 +259,23 @@ class AgentMetadataReader(
                     conditions = conditions,
                 )
             } else {
+                val distinctGoalTypes = goalActions.map { it.returnType }.toSet()
+                if (distinctGoalTypes.size > 1) {
+                    val typeNames = distinctGoalTypes.joinToString { it.simpleName.ifEmpty { it.name } }
+                    if (restrictedGoals) {
+                        logger.warn(
+                            "Agent {} has @AchievesGoal actions returning distinct types [{}] - rejected. Set embabel.agent.platform.planner.restricted-goals=false to allow",
+                            targetType.name,
+                            typeNames,
+                        )
+                        return null
+                    }
+                    logger.debug(
+                        "Agent {} has @AchievesGoal actions returning distinct types [{}] - allowing (restricted-goals=false)",
+                        targetType.name,
+                        typeNames,
+                    )
+                }
                 CoreAgent(
                     name = agenticInfo.agentName(),
                     provider = agenticInfo.agentAnnotation.provider.ifBlank {

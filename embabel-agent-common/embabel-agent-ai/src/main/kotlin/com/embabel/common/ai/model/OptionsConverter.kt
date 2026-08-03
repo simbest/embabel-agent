@@ -19,24 +19,33 @@ import org.springframework.ai.chat.prompt.ChatOptions
 import org.springframework.ai.model.tool.ToolCallingChatOptions
 
 /**
- * Convert our LLM options to Spring AI ChatOptions
+ * Convert our LLM options to Spring AI ChatOptions.
+ *
+ * Implementations must override [convertOptions] and include the given [model]
+ * in the returned [ChatOptions] so that the configured model name is always
+ * stamped onto outgoing requests.
  */
-fun interface OptionsConverter<O : ChatOptions> {
-    fun convertOptions(options: LlmOptions): O
+interface OptionsConverter {
+
+    /**
+     * Convert [LlmOptions] to provider-specific [ChatOptions], stamping the
+     * given [model] name onto the result.
+     */
+    fun convertOptions(options: LlmOptions, model: String): ChatOptions
 }
 
 /**
  * Do not use in production code, this is just a lowest common denominator
- * and example
+ * and example.
  */
-object DefaultOptionsConverter : OptionsConverter<ChatOptions> {
-    override fun convertOptions(options: LlmOptions): ChatOptions =
+object DefaultOptionsConverter : OptionsConverter {
+    override fun convertOptions(options: LlmOptions, model: String): ChatOptions =
         ToolCallingChatOptions.builder()
+            .model(model)
             .temperature(options.temperature)
             .topP(options.topP)
             .maxTokens(options.maxTokens)
             .presencePenalty(options.presencePenalty)
             .frequencyPenalty(options.frequencyPenalty)
-            .topP(options.topP)
             .build()
 }

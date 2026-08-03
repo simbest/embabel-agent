@@ -4,7 +4,7 @@
     <parent>
         <groupId>com.embabel.agent</groupId>
         <artifactId>embabel-agent-parent</artifactId>
-        <version>0.5.0-SNAPSHOT</version>
+        <version>1.5.0-SNAPSHOT</version>
     </parent>
     <artifactId>embabel-agent-autoconfigure</artifactId>
     <packaging>pom</packaging>
@@ -39,6 +39,8 @@
         <module>models/embabel-agent-google-genai-autoconfigure</module>
         <module>models/embabel-agent-oci-genai-autoconfigure</module>
         <module>models/embabel-agent-minimax-autoconfigure</module>
+        <module>models/embabel-agent-zai-autoconfigure</module>
+        <module>models/embabel-agent-dashscope-autoconfigure</module>
         <module>models/embabel-agent-mistral-ai-autoconfigure</module>
         <module>models/embabel-agent-onnx-autoconfigure</module>
     </modules>

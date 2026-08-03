@@ -1,8 +1,8 @@
-# Embabel Agent Framework
+# [Embabel Agent Framework](https://hub.embabel.com)
 
-<img align="left" src="https://github.com/embabel/embabel-agent/blob/main/embabel-agent-api/images/315px-Meister_der_Weltenchronik_001.jpg?raw=true" width="180">
+<a href="https://hub.embabel.com"><img align="left" src="https://github.com/embabel/embabel-agent/blob/main/embabel-agent-api/images/315px-Meister_der_Weltenchronik_001.jpg?raw=true" width="180"></a>
 
-[![Docs](https://img.shields.io/badge/docs-live-brightgreen)](https://docs.embabel.com/embabel-agent/guide/0.1.2-SNAPSHOT/)
+[![Docs](https://img.shields.io/badge/docs-live-brightgreen)](https://docs.embabel.com/embabel-agent/guide/1.5.0-SNAPSHOT/)
 [![MvnRepository](https://badges.mvnrepository.com/badge/com.embabel.agent/embabel-agent-api/badge.svg?label=MvnRepository)](https://mvnrepository.com/artifact/com.embabel.agent/embabel-agent-api)
 ![Build](https://github.com/embabel/embabel-agent/actions/workflows/maven.yml/badge.svg)
 [![YourKit](https://img.shields.io/badge/Profiling-YourKit-blue)](https://www.yourkit.com/)
@@ -40,6 +40,11 @@ model from Java.
 From the creator of Spring.
 
 &nbsp;
+
+## Talk to the Docs
+
+Have questions? [Talk to the docs via the Embabel-powered hub](https://hub.embabel.com) — an
+Embabel agent that answers your questions about the framework in natural language.
 
 ## Key Concepts
 
@@ -611,7 +616,8 @@ Required:
 Optional:
 
 - `ANTHROPIC_API_KEY`: For the Anthropic API. Necessary for the coding agent.
-- `MINIMAX_API_KEY`: For the [MiniMax](https://www.minimax.io) API. Supports MiniMax-M2.7 and MiniMax-M2.7-highspeed models.
+- `MINIMAX_API_KEY`: For the [MiniMax](https://www.minimax.io) API. Supports MiniMax-M3, MiniMax-M2.7 and MiniMax-M2.7-highspeed models.
+- `ZAI_API_KEY`: For the [Z.ai](https://z.ai) (Zhipu AI) API. Supports GLM-5.2, GLM-4.7, GLM-4.6, GLM-4.5-Air and GLM-4.7-Flash models.
 - OCI Generative AI uses OCI SDK authentication providers. Add `embabel-agent-starter-oci-genai` and set
   `embabel.agent.platform.models.ocigenai.compartment-id`; OCI config file, instance principal, resource principal,
   workload identity, session token and simple key authentication are supported.
@@ -1291,9 +1297,11 @@ Pick **one** (or combine multiple):
 ```yaml
 # Enable observability
 embabel:
-  observability:
-    enabled: true
-    service-name: my-agent-app
+  agent:
+    platform:
+      observability:
+        enabled: true
+        service-name: my-agent-app
 
 # Enable Spring Boot tracing
 management:
@@ -1419,4 +1427,4 @@ This file also informs coding agent behavior.
 
 
 --------------------
-(c) Embabel Software Inc 2024-2025.
+(c) Embabel Software Inc 2024-2026.

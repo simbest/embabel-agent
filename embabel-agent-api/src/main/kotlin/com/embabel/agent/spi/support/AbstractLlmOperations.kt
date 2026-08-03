@@ -40,11 +40,12 @@ import com.embabel.common.ai.model.ModelSelectionCriteria
 import com.embabel.common.ai.model.PreResolvedModelSelectionCriteria
 import com.embabel.common.core.thinking.ThinkingResponse
 import com.embabel.common.util.time
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import jakarta.validation.ConstraintViolation
 import jakarta.validation.Validator
 import java.lang.reflect.Field
 import java.time.Duration
+import java.util.Locale
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -107,9 +108,9 @@ abstract class AbstractLlmOperations(
             future.get(timeoutMillis, TimeUnit.MILLISECONDS)
         } catch (e: TimeoutException) {
             future.cancel(true)
-            logger.warn(LLM_TIMEOUT_MESSAGE, interactionId, attempt, timeoutMillis)
+            logger.warn(LLM_TIMEOUT_MESSAGE, interactionId, attempt, "%,d".format(Locale.ROOT, timeoutMillis))
             throw RuntimeException(
-                "LLM call for interaction $interactionId timed out after ${timeoutMillis}ms",
+                "LLM call for interaction $interactionId timed out after ${"%,d".format(Locale.ROOT, timeoutMillis)}ms",
                 e
             )
         } catch (e: InterruptedException) {
@@ -427,6 +428,11 @@ abstract class AbstractLlmOperations(
     override fun supportsStreaming(options: LlmOptions): Boolean {
         val llmService = chooseLlm(options)
         return llmService.supportsStreaming()
+    }
+
+    override fun supportsThinking(options: LlmOptions): Boolean {
+        val llmService = chooseLlm(options)
+        return llmService.supportsThinking()
     }
 
     override fun createStreamingOperations(options: LlmOptions): StreamingLlmOperations {

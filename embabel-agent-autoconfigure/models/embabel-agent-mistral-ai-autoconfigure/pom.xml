@@ -4,7 +4,7 @@
 	<parent>
 		<groupId>com.embabel.agent</groupId>
 		<artifactId>embabel-agent-autoconfigure</artifactId>
-		<version>0.5.0-SNAPSHOT</version>
+		<version>1.5.0-SNAPSHOT</version>
 		<relativePath>../../pom.xml</relativePath>
 	</parent>
 	<artifactId>embabel-agent-mistral-ai-autoconfigure</artifactId>
@@ -34,6 +34,14 @@
 		<dependency>
 			<groupId>com.embabel.agent</groupId>
 			<artifactId>embabel-agent-test-internal</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- Reproduces the production classpath: presence of reactor-netty makes RestClient.builder()
+		     select ReactorClientHttpRequestFactory, whose default HttpClient carries a 10s responseTimeout. -->
+		<dependency>
+			<groupId>io.projectreactor.netty</groupId>
+			<artifactId>reactor-netty-http</artifactId>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>

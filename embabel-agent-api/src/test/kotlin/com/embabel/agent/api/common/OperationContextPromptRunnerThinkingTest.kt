@@ -39,7 +39,7 @@ import kotlin.test.fail
  * Tests for thinking functionality in OperationContextPromptRunner.
  *
  * Focuses on:
- * - withThinking() creates operational ThinkingPromptRunnerOperations
+ * - withThinking() creates operational PromptRunner.Thinking
  * - Error handling for incompatible LlmOperations implementations
  */
 class OperationContextPromptRunnerThinkingTest {
@@ -82,6 +82,7 @@ class OperationContextPromptRunnerThinkingTest {
     fun `withThinking creates operational ThinkingPromptRunnerOperations with ChatClientLlmOperations`() {
         // Given: OperationContext with ChatClientLlmOperations and various LlmOptions scenarios
         val mockChatClientOps = mockk<ChatClientLlmOperations>(relaxed = true)
+        every { mockChatClientOps.supportsThinking(any()) } returns true
         val context = createMockOperationContextWithLlmOperations(mockChatClientOps)
 
         // Test with default LlmOptions
@@ -104,14 +105,26 @@ class OperationContextPromptRunnerThinkingTest {
         val thinkingOps = thinkingRunner.thinking()
         assertNotNull(thinkingOps)
 
-        // All should create valid, operational ThinkingPromptRunnerOperations
+        // All should create valid, operational PromptRunner.Thinking
         // The fact they were created without exceptions validates the internal setup
+    }
+
+    @Test
+    fun `supportsThinking delegates to llm operations`() {
+        val mockChatClientOps = mockk<ChatClientLlmOperations>(relaxed = true)
+        every { mockChatClientOps.supportsThinking(any()) } returns true
+        val context = createMockOperationContextWithLlmOperations(mockChatClientOps)
+        val runner = createOperationContextPromptRunner(context)
+
+        assertTrue(runner.supportsThinking())
     }
 
     @Test
     fun `withThinking throws UnsupportedOperationException for non-ChatClientLlmOperations`() {
         // Given: OperationContext with non-ChatClientLlmOperations
         val unsupportedLlmOps = object : LlmOperations {
+            override fun supportsThinking(options: LlmOptions): Boolean = false
+
             override fun <O> createObject(
                 messages: List<Message>,
                 interaction: LlmInteraction,

@@ -16,6 +16,7 @@
 package com.embabel.agent.config.models.docker
 
 import com.embabel.agent.api.models.DockerLocalModels.Companion.PROVIDER
+import com.embabel.agent.config.models.docker.DockerRetryProperties.Companion.PREFIX
 import com.embabel.agent.openai.OpenAiChatOptionsConverter
 import com.embabel.agent.spi.common.RetryProperties
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
@@ -23,16 +24,16 @@ import com.embabel.common.ai.autoconfig.ProviderInitialization
 import com.embabel.common.ai.autoconfig.RegisteredModel
 import com.embabel.common.ai.model.*
 import com.embabel.common.util.ExcludeFromJacocoGeneratedReport
+import com.openai.client.OpenAIClient
+import com.openai.client.okhttp.OpenAIOkHttpClient
 import io.micrometer.observation.ObservationRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.ai.document.MetadataMode
-import org.springframework.ai.model.NoopApiKey
 import org.springframework.ai.model.tool.ToolCallingManager
 import org.springframework.ai.openai.OpenAiChatModel
 import org.springframework.ai.openai.OpenAiChatOptions
 import org.springframework.ai.openai.OpenAiEmbeddingModel
 import org.springframework.ai.openai.OpenAiEmbeddingOptions
-import org.springframework.ai.openai.api.OpenAiApi
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.config.ConfigurableBeanFactory
 import org.springframework.boot.context.properties.ConfigurationProperties
@@ -42,10 +43,9 @@ import org.springframework.context.annotation.Configuration
 import org.springframework.http.MediaType
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.body
-import org.springframework.web.reactive.function.client.WebClient
 
 
-@ConfigurationProperties(prefix = "embabel.agent.platform.models.docker")
+@ConfigurationProperties(prefix = PREFIX)
 class DockerRetryProperties : RetryProperties {
 
     /**
@@ -67,6 +67,11 @@ class DockerRetryProperties : RetryProperties {
      * Maximum backoff interval (in milliseconds).
      */
     override var backoffMaxInterval: Long = 180000L
+
+    override val propertyPrefix: String = PREFIX
+    companion object {
+        const val PREFIX  = "embabel.agent.platform.models.docker"
+    }
 }
 
 @ConfigurationProperties(prefix = "embabel.agent.models.docker")
@@ -84,6 +89,12 @@ class DockerConnectionProperties {
  * discovery fails silently and no models are registered.
  * Model names will be precisely as reported from
  * http://localhost:12434/engines/v1/models (assuming default port).
+ *
+ * Spring AI 2.0 swapped its hand-rolled `OpenAiApi` for the openai-java SDK
+ * ([OpenAIClient]). The migration removes Spring's `RestClient`/`WebClient` from
+ * the OpenAI HTTP path entirely — the SDK uses OkHttp internally. Spring AI 2.0
+ * also dropped the spring-retry `RetryTemplate` parameter on `OpenAiChatModel.Builder`;
+ * retries are now wrapped at the ChatClientLlmOperations layer instead.
  */
 @ExcludeFromJacocoGeneratedReport(reason = "Docker model configuration can't be unit tested")
 @Configuration(proxyBeanMethods = false)
@@ -93,7 +104,8 @@ class DockerConnectionProperties {
     ConfigurableModelProviderProperties::class
 )
 class DockerLocalModelsConfig(
-    private val dockerRetryProperties: DockerRetryProperties,
+    @Suppress("UNUSED_PARAMETER")
+    dockerRetryProperties: DockerRetryProperties,
     private val dockerConnectionProperties: DockerConnectionProperties,
     private val configurableBeanFactory: ConfigurableBeanFactory,
     private val properties: ConfigurableModelProviderProperties,
@@ -113,6 +125,20 @@ class DockerLocalModelsConfig(
     private data class Model(
         val id: String,
     )
+
+    /**
+     * Shared OpenAI-compatible client pointing at the local Docker endpoint.
+     * Built lazily on first model creation so a missing endpoint doesn't crash
+     * Spring startup (loadModels already swallows the failure).
+     */
+    private val openAiClient: OpenAIClient by lazy {
+        OpenAIOkHttpClient.builder()
+            .baseUrl(dockerConnectionProperties.baseUrl)
+            // The openai-java SDK rejects null/blank API keys even when the
+            // backing server doesn't require auth. Placeholder is fine.
+            .apiKey("no-auth")
+            .build()
+    }
 
     private fun loadModels(): List<Model> =
         try {
@@ -185,16 +211,14 @@ class DockerLocalModelsConfig(
     }
 
     private fun dockerEmbeddingServiceOf(model: Model): SpringAiEmbeddingService {
-        val springEmbeddingModel = OpenAiEmbeddingModel(
-            OpenAiApi.Builder()
-                .baseUrl(dockerConnectionProperties.baseUrl)
-                .apiKey(NoopApiKey())
-                .build(),
-            MetadataMode.EMBED,
-            OpenAiEmbeddingOptions.builder()
+        val springEmbeddingModel = OpenAiEmbeddingModel.builder()
+            .openAiClient(openAiClient)
+            .metadataMode(MetadataMode.EMBED)
+            .options(OpenAiEmbeddingOptions.builder()
                 .model(model.id)
-                .build(),
-        )
+                .build())
+            .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
+            .build()
 
         return SpringAiEmbeddingService(
             name = model.id,
@@ -205,32 +229,18 @@ class DockerLocalModelsConfig(
 
     private fun dockerLlmOf(model: Model): SpringAiLlmService {
         val chatModel = OpenAiChatModel.builder()
-            .openAiApi(
-                OpenAiApi.Builder()
-                    .baseUrl(dockerConnectionProperties.baseUrl)
-                    .apiKey(NoopApiKey())
-                    .restClientBuilder(
-                        RestClient.builder()
-                            .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
-                    )
-                    .webClientBuilder(
-                        WebClient.builder()
-                            .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
-                    )
-                    .build()
-            )
+            .openAiClient(openAiClient)
             .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
             .toolCallingManager(
                 ToolCallingManager.builder()
                     .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
                     .build()
             )
-            .defaultOptions(
+            .options(
                 OpenAiChatOptions.builder()
                     .model(model.id)
                     .build()
             )
-            .retryTemplate(dockerRetryProperties.retryTemplate("docker-${model.id}"))
             .build()
         return SpringAiLlmService(
             name = model.id,

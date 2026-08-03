@@ -19,14 +19,15 @@ import com.embabel.agent.spi.LlmService
 import com.embabel.agent.spi.loop.LlmMessageSender
 import com.embabel.agent.spi.loop.streaming.LlmMessageStreamer
 import com.embabel.agent.spi.support.springai.streaming.SpringAiLlmMessageStreamer
+import com.embabel.common.ai.autoconfig.NativeSupport
 import com.embabel.common.ai.model.*
 import com.embabel.common.ai.prompt.KnowledgeCutoffDate
 import com.embabel.common.ai.prompt.PromptContributor
-import com.fasterxml.jackson.databind.annotation.JsonSerialize
-import org.springframework.ai.chat.client.ChatClient
+import tools.jackson.databind.annotation.JsonSerialize
 import org.springframework.ai.chat.messages.UserMessage
 import org.springframework.ai.chat.model.ChatModel
 import org.springframework.ai.chat.model.ChatResponse
+import org.springframework.ai.chat.prompt.ChatOptions
 import org.springframework.ai.chat.prompt.Prompt
 import reactor.core.publisher.Flux
 import java.time.Duration
@@ -84,14 +85,21 @@ private object StreamingCapabilityVerifier {
  * @param name Name of the LLM
  * @param provider Name of the provider (e.g., "OpenAI", "Anthropic")
  * @param chatModel The Spring AI ChatModel to use for LLM calls
- * @param optionsConverter Function to convert [LlmOptions] to Spring AI ChatOptions
+ * @param optionsConverter Function to convert [LlmOptions] to Spring AI ChatOptions.
+ *        Do not call [OptionsConverter.convertOptions] directly — use [SpringAiLlmService.convertOptions]
+ *        which also stamps the configured model name.
  * @param knowledgeCutoffDate Model's knowledge cutoff date, if known
  * @param promptContributors List of prompt contributors for this model.
  *        Knowledge cutoff is automatically included if knowledgeCutoffDate is set.
  * @param pricingModel Pricing model for this LLM, if known
+ * @param thinkingSupported Whether this model supports Embabel thinking operations,
+ *        including generic thinking extraction or provider-native reasoning exposed
+ *        through Embabel's thinking mode.
  * @param toolResponseContentAdapter Adapts tool response content for provider-specific
  *        format requirements. Defaults to [ToolResponseContentAdapter.PASSTHROUGH].
  *        Google GenAI requires JSON; OpenAI/Anthropic accept plain text.
+ * @param nativeStructuredOutputConfigurer Spring AI-specific translator for native structured-output
+ *        request metadata. Defaults to no-op so unsupported providers keep prompt-schema fallback.
  */
 @JsonSerialize(`as` = LlmMetadata::class)
 data class SpringAiLlmService @JvmOverloads constructor(
@@ -99,12 +107,16 @@ data class SpringAiLlmService @JvmOverloads constructor(
     override val provider: String,
     @get:JvmName("getChatModel")
     val chatModel: ChatModel,
-    val optionsConverter: OptionsConverter<*> = DefaultOptionsConverter,
+    val optionsConverter: OptionsConverter = DefaultOptionsConverter,
     override val knowledgeCutoffDate: LocalDate? = null,
     override val promptContributors: List<PromptContributor> =
         buildList { knowledgeCutoffDate?.let { add(KnowledgeCutoffDate(it)) } },
     override val pricingModel: PricingModel? = null,
+    val thinkingSupported: Boolean = false,
     val toolResponseContentAdapter: ToolResponseContentAdapter = ToolResponseContentAdapter.PASSTHROUGH,
+    val nativeStructuredOutputConfigurer: SpringAiNativeStructuredOutputConfigurer =
+        SpringAiNativeStructuredOutputConfigurer.NOOP,
+    val nativeSupport: NativeSupport? = null,
 ) : LlmService<SpringAiLlmService>, AiModel<ChatModel> {
 
     /**
@@ -113,18 +125,31 @@ data class SpringAiLlmService @JvmOverloads constructor(
      */
     override val model: ChatModel get() = chatModel
 
+    fun convertOptions(llmOptions: LlmOptions): ChatOptions =
+        optionsConverter.convertOptions(llmOptions, name)
+
     override fun createMessageSender(options: LlmOptions): LlmMessageSender {
-        val chatOptions = optionsConverter.convertOptions(options)
-        return SpringAiLlmMessageSender(chatModel, chatOptions, toolResponseContentAdapter)
+        return SpringAiLlmMessageSender(
+            chatModel = chatModel,
+            chatOptions = convertOptions(options),
+            toolResponseContentAdapter = toolResponseContentAdapter,
+            nativeStructuredOutputConfigurer = nativeStructuredOutputConfigurer,
+            nativeSupport = nativeSupport,
+            llmMetadata = this,
+        )
     }
 
     override fun createMessageStreamer(options: LlmOptions): LlmMessageStreamer {
-        val chatOptions = optionsConverter.convertOptions(options)
-        val chatClient = ChatClient.create(chatModel)
-        return SpringAiLlmMessageStreamer(chatClient, chatOptions)
+        return SpringAiLlmMessageStreamer(
+            chatModel = chatModel,
+            chatOptions = convertOptions(options),
+            toolResponseContentAdapter = toolResponseContentAdapter,
+        )
     }
 
     override fun supportsStreaming(): Boolean = StreamingCapabilityVerifier.supportsStreaming(chatModel)
+
+    override fun supportsThinking(): Boolean = thinkingSupported
 
     override fun withKnowledgeCutoffDate(date: LocalDate): SpringAiLlmService =
         copy(
@@ -138,6 +163,6 @@ data class SpringAiLlmService @JvmOverloads constructor(
     /**
      * Returns a copy with a different options converter.
      */
-    fun withOptionsConverter(converter: OptionsConverter<*>): SpringAiLlmService =
+    fun withOptionsConverter(converter: OptionsConverter): SpringAiLlmService =
         copy(optionsConverter = converter)
 }

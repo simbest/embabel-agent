@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.e2e
 
 import com.embabel.agent.AgentApiTestApplication
@@ -21,6 +23,7 @@ import com.embabel.agent.api.common.Ai
 import com.embabel.agent.api.common.autonomy.Autonomy
 import com.embabel.agent.api.common.streaming.StreamingPromptRunner
 import com.embabel.agent.api.common.streaming.asStreaming
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
 import com.embabel.agent.core.AgentPlatform
 import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.spi.LlmService
@@ -32,7 +35,7 @@ import com.embabel.common.ai.model.DefaultOptionsConverter
 import com.embabel.common.ai.model.ModelProvider
 import com.embabel.common.ai.model.PricingModel
 import com.embabel.common.textio.template.TemplateRenderer
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import jakarta.validation.Validator
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
@@ -43,6 +46,7 @@ import org.springframework.ai.chat.model.ChatResponse
 import org.springframework.ai.chat.model.Generation
 import org.springframework.ai.chat.prompt.ChatOptions
 import org.springframework.ai.chat.prompt.DefaultChatOptions
+import org.springframework.ai.model.tool.ToolCallingChatOptions
 import org.springframework.ai.chat.prompt.Prompt
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -60,10 +64,12 @@ import reactor.core.publisher.Flux
  */
 class FakeStreamingChatModel(
     private val response: String,
-    private val options: ChatOptions = DefaultChatOptions(),
+    // Spring AI 2.0 ToolCallAdvisor requires the ChatClientRequest options to be
+    // ToolCallingChatOptions; the merge is rooted on ChatModel.getOptions().
+    private val options: ChatOptions = ToolCallingChatOptions.builder().build(),
 ) : ChatModel {
 
-    override fun getDefaultOptions(): ChatOptions = options
+    override fun getOptions(): ChatOptions = options
 
     override fun call(prompt: Prompt): ChatResponse {
         return ChatResponse(

@@ -17,12 +17,17 @@ package com.embabel.agent.spi.support.streaming
 
 import com.embabel.agent.api.event.LlmRequestEvent
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.core.Action
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.spi.LlmService
 import com.embabel.agent.spi.ToolDecorator
 import com.embabel.agent.spi.loop.streaming.LlmMessageStreamer
+import com.embabel.agent.spi.loop.streaming.DefaultStreamingToolLoop
+import com.embabel.agent.spi.loop.AutoCorrectionPolicy
+import com.embabel.agent.spi.loop.ChainedToolInjectionStrategy
+import com.embabel.agent.spi.loop.ToolInjectionStrategy
 import com.embabel.agent.core.internal.streaming.StreamingLlmOperations
 import com.embabel.agent.spi.support.PROMPT_ELEMENT_SEPARATOR
 import com.embabel.agent.spi.support.ToolResolutionHelper
@@ -33,7 +38,7 @@ import com.embabel.chat.Message
 import com.embabel.chat.UserMessage
 import com.embabel.common.ai.converters.streaming.StreamingJacksonOutputConverter
 import com.embabel.common.core.streaming.StreamingEvent
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
@@ -134,7 +139,7 @@ internal class StreamingLlmOperationsImpl(
         val messagesWithContributions = buildMessagesWithContributions(messages, promptContributions)
 
         // Stream raw chunks from LLM
-        return messageStreamer.stream(messagesWithContributions, tools, interaction.toolCallInspectors)
+        return streamWithToolLoop(messagesWithContributions, tools, interaction, agentProcess, action)
     }
 
     override fun <O> doTransformObjectStream(
@@ -196,13 +201,18 @@ internal class StreamingLlmOperationsImpl(
         agentProcess: AgentProcess?,
         action: Action?,
     ): Flux<StreamingEvent<O>> {
-        // Create converter for JSONL parsing
-        val streamingConverter = StreamingJacksonOutputConverter(
-            clazz = outputClass,
+        // Create converter for JSONL parsing.
+        // Spring AI 2.0's StreamingJacksonOutputConverter requires T : Any;
+        // erase O via Class<Any> for the construction, cast back for downstream Flux<O>/StreamingEvent<O>.
+        @Suppress("UNCHECKED_CAST")
+        val outputClassAny = outputClass as Class<Any>
+        @Suppress("UNCHECKED_CAST")
+        val streamingConverter = StreamingJacksonOutputConverter<Any>(
+            clazz = outputClassAny,
             objectMapper = objectMapper,
             fieldFilter = interaction.fieldFilter,
             thinkingEnabled = interaction.llm.thinking?.enabled ?: false,
-        )
+        ) as StreamingJacksonOutputConverter<O>
 
         // Build prompt contributions with streaming format instructions
         val promptContributions = buildPromptContributions(interaction)
@@ -225,7 +235,13 @@ internal class StreamingLlmOperationsImpl(
         val messagesWithContributions = buildMessagesWithContributions(messages, fullPromptContributions)
 
         // Step 1: Raw chunk stream from LLM
-        val rawChunkFlux: Flux<String> = messageStreamer.stream(messagesWithContributions, tools, interaction.toolCallInspectors)
+        val rawChunkFlux: Flux<String> = streamWithToolLoop(
+            messagesWithContributions,
+            tools,
+            interaction,
+            agentProcess,
+            action,
+        )
             .filter { it.isNotEmpty() }
             .doOnNext { chunk -> logger.trace("RAW CHUNK: '${chunk.replace("\n", "\\n")}'") }
 
@@ -266,6 +282,53 @@ internal class StreamingLlmOperationsImpl(
         action: Action?,
     ): List<Tool> {
         return ToolResolutionHelper.resolveAndDecorate(interaction, agentProcess, action, toolDecorator)
+    }
+
+    /**
+     * Stream through Embabel's provider-neutral tool loop. The loop is created per
+     * invocation so conversation, injection, and retry state cannot leak between subscribers.
+     */
+    private fun streamWithToolLoop(
+        messages: List<Message>,
+        tools: List<Tool>,
+        interaction: LlmInteraction,
+        agentProcess: AgentProcess?,
+        action: Action?,
+    ): Flux<String> {
+        val injectionStrategy = if (interaction.additionalInjectionStrategies.isEmpty()) {
+            ToolInjectionStrategy.DEFAULT
+        } else {
+            ChainedToolInjectionStrategy(
+                listOf(ToolInjectionStrategy.DEFAULT) + interaction.additionalInjectionStrategies
+            )
+        }
+        val processToolCallContext = agentProcess
+            ?.processContext
+            ?.processOptions
+            ?.toolCallContext
+            ?: ToolCallContext.EMPTY
+        val toolCallContext = processToolCallContext.merge(interaction.toolCallContext)
+        val injectedToolDecorator: ((Tool) -> Tool)? = agentProcess?.let { process ->
+            { tool ->
+                toolDecorator.decorate(
+                    tool = tool,
+                    agentProcess = process,
+                    action = action,
+                    llmOptions = interaction.llm,
+                )
+            }
+        }
+
+        return DefaultStreamingToolLoop(
+            messageStreamer = messageStreamer,
+            objectMapper = objectMapper,
+            injectionStrategy = injectionStrategy,
+            maxIterations = interaction.maxToolIterations,
+            toolDecorator = injectedToolDecorator,
+            toolCallInspectors = interaction.toolCallInspectors,
+            toolCallContext = toolCallContext,
+            toolNotFoundPolicy = interaction.toolNotFoundPolicy ?: AutoCorrectionPolicy(),
+        ).execute(messages, tools)
     }
 
     /**

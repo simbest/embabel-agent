@@ -34,7 +34,7 @@ import java.io.IOException;
  * <p>Runs at {@link Ordered#HIGHEST_PRECEDENCE} to ensure wrapping happens before
  * Spring's {@code ServerHttpObservationFilter} creates its observation context.
  *
- * <p>Only active when {@code embabel.observability.trace-http-details=true}.
+ * <p>Only active when {@code embabel.agent.platform.observability.trace-http-details=true}.
  *
  * @since 0.3.4
  */
@@ -51,9 +51,12 @@ public class HttpBodyCachingFilter extends OncePerRequestFilter implements Order
             @NotNull HttpServletResponse response,
             @NotNull FilterChain filterChain) throws ServletException, IOException {
 
+        // Spring Framework 7 dropped the single-arg ContentCachingRequestWrapper(request)
+        // ctor; must specify contentCacheLimit. Use Integer.MAX_VALUE to retain prior
+        // unbounded-buffer behaviour (responsibility of the caller to scope its use).
         var wrappedRequest = request instanceof ContentCachingRequestWrapper
                 ? request
-                : new ContentCachingRequestWrapper(request);
+                : new ContentCachingRequestWrapper(request, Integer.MAX_VALUE);
         var wrappedResponse = response instanceof ContentCachingResponseWrapper ccr
                 ? ccr
                 : new ContentCachingResponseWrapper(response);

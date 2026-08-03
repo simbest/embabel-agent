@@ -42,7 +42,7 @@ import com.embabel.agent.core.last
 import com.embabel.agent.domain.io.UserInput
 import com.embabel.agent.support.Dog
 import com.embabel.common.ai.model.LlmOptions
-import com.fasterxml.jackson.databind.annotation.JsonDeserialize
+import tools.jackson.databind.annotation.JsonDeserialize
 
 data class PersonWithReverseTool(val name: String) {
 
@@ -602,7 +602,7 @@ class FromPersonUsesObjectToolsViaAi {
         ai: Ai,
     ): UserInput {
         return ai.withDefaultLlm()
-            .withToolObjectInstances(ToolObject(FunnyTool()))
+            .withToolObjects(ToolObject(FunnyTool()))
             .createObject("Create a UserInput")
     }
 }
@@ -820,6 +820,19 @@ class AgentWithNonReadOnlyAction {
     fun modifyData(userInput: UserInput): PersonWithReverseTool {
         return PersonWithReverseTool(userInput.content)
     }
+}
+
+@Agent(description = "agent with multiple AchievesGoal actions")
+class AgentWithMultipleAchievesGoalActions {
+
+    @AchievesGoal(description = "First result")
+    @Action
+    fun firstAction(userInput: UserInput): PersonWithReverseTool = PersonWithReverseTool(userInput.content)
+
+    @AchievesGoal(description = "Second result")
+    @Action
+    fun secondAction(person: PersonWithReverseTool): Frog = Frog(person.name)
+
 }
 
 @Agent(description = "agent with duplicate action names via overloaded methods")

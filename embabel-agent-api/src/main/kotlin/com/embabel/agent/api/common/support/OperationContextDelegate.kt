@@ -53,7 +53,7 @@ import com.embabel.common.core.thinking.ThinkingResponse
 import com.embabel.common.core.types.ZeroToOne
 import com.embabel.common.textio.template.TemplateRenderer
 import com.embabel.common.util.loggerFor
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import java.lang.reflect.Field
 import java.util.concurrent.atomic.AtomicLong
 import java.util.function.Predicate
@@ -412,7 +412,10 @@ internal data class OperationContextDelegate(
             )
     }
 
-    override fun supportsThinking(): Boolean = true
+    override fun supportsThinking(): Boolean {
+        val llmOperations = context.agentPlatform().platformServices.llmOperations
+        return llmOperations.supportsThinking(this.llm)
+    }
 
     // Patterned after createObject() - uses ProcessContext flow
     override fun <T> createObjectWithThinking(

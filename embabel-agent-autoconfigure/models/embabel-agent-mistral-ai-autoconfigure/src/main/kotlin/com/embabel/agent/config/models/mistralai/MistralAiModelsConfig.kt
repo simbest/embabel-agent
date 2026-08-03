@@ -16,6 +16,7 @@
 package com.embabel.agent.config.models.mistralai
 
 import com.embabel.agent.api.models.MistralAiModels
+import com.embabel.agent.config.models.mistralai.MistralAiProperties.Companion.PREFIX
 import com.embabel.agent.spi.LlmService
 import com.embabel.agent.spi.common.RetryProperties
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
@@ -28,24 +29,31 @@ import com.embabel.common.ai.model.PerTokenPricingModel
 import io.micrometer.observation.ObservationRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.ai.mistralai.MistralAiChatModel
+import org.springframework.ai.chat.prompt.ChatOptions
 import org.springframework.ai.mistralai.MistralAiChatOptions
 import org.springframework.ai.mistralai.api.MistralAiApi
 import org.springframework.ai.model.tool.ToolCallingManager
 import org.springframework.beans.factory.ObjectProvider
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.beans.factory.config.ConfigurableBeanFactory
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.boot.context.properties.EnableConfigurationProperties
+import org.springframework.boot.convert.DurationStyle
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.core.retry.RetryPolicy
+import org.springframework.core.retry.RetryTemplate
+import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.web.client.RestClient
 import org.springframework.web.reactive.function.client.WebClient
+import java.time.Duration
 
 /**
  * Configuration properties for Mistral AI models.
  * These properties control retry behavior when calling Mistral AI APIs.
  */
-@ConfigurationProperties(prefix = "embabel.agent.platform.models.mistralai")
+@ConfigurationProperties(prefix = PREFIX)
 class MistralAiProperties : RetryProperties {
     /**
      * Base URL for Mistral AI API requests.
@@ -76,6 +84,11 @@ class MistralAiProperties : RetryProperties {
      * Maximum backoff interval (in milliseconds).
      */
     override var backoffMaxInterval: Long = 180_000L
+
+    override val propertyPrefix: String = PREFIX
+    companion object {
+        const val PREFIX  = "embabel.agent.platform.models.mistralai"
+    }
 }
 
 /**
@@ -93,6 +106,12 @@ class MistralAiModelsConfig(
     private val properties: MistralAiProperties,
     private val observationRegistry: ObjectProvider<ObservationRegistry>,
     private val configurableBeanFactory: ConfigurableBeanFactory,
+    @param:Qualifier("aiModelRestClientBuilder")
+    private val restClientBuilderProvider: ObjectProvider<RestClient.Builder>,
+    @param:Qualifier("aiModelWebClientBuilder")
+    private val webClientBuilderProvider: ObjectProvider<WebClient.Builder>,
+    @param:Value("\${embabel.agent.platform.http-client.read-timeout:5m}")
+    private val httpReadTimeout: String,
     private val modelLoader: LlmAutoConfigMetadataLoader<MistralAiModelDefinitions> = MistralAiModelLoader(),
 ) {
     private val logger = LoggerFactory.getLogger(MistralAiModelsConfig::class.java)
@@ -144,14 +163,17 @@ class MistralAiModelsConfig(
     private fun createMistralAiLlm(modelDef: MistralAiModelDefinition): LlmService<*> {
         val mistralChatModel = MistralAiChatModel
             .builder()
-            .defaultOptions(createDefaultOptions(modelDef))
+            .options(createDefaultOptions(modelDef))
             .mistralAiApi(createMistralAiApi())
             .toolCallingManager(
                 ToolCallingManager.builder()
                     .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
                     .build()
             )
-            .retryTemplate(properties.retryTemplate("mistral-ai-${modelDef.modelId}"))
+            // Spring AI 2.0's builder takes Spring Framework 7's org.springframework.core.retry.RetryTemplate.
+            // Build it from the configured retry properties so the model honors maxAttempts/backoff instead of
+            // silently using its built-in 10-attempt / 3-minute default (RetryUtils.DEFAULT_RETRY_TEMPLATE).
+            .retryTemplate(platformRetryTemplate())
             .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
             .build()
 
@@ -184,32 +206,74 @@ class MistralAiModelsConfig(
             .build()
     }
 
+    /**
+     * A [MistralAiApi] is stateless and model-agnostic — the model id and options live on
+     * [MistralAiChatOptions], not on the API — so all models share one instance, exactly as
+     * [org.springframework.ai.openai.api.OpenAiApi] is shared across providers built on
+     * OpenAiCompatibleModelFactory. Since the Spring AI 2.0.0 upgrade reasoning content ("magistral"
+     * models) is supported natively, so a single plain API serves every model.
+     */
+    /**
+     * Builds the Spring Framework 7 [RetryTemplate] for the chat model from the configured retry
+     * properties. In core.retry, [RetryPolicy] counts retries after the first attempt, so a
+     * maxAttempts of N maps to N-1 retries (maxAttempts=1 means a single try, no retry).
+     */
+    private fun platformRetryTemplate(): RetryTemplate {
+        val policy = RetryPolicy.builder()
+            .maxRetries((properties.maxAttempts - 1).coerceAtLeast(0).toLong())
+            .delay(Duration.ofMillis(properties.backoffMillis))
+            .multiplier(properties.backoffMultiplier)
+            .maxDelay(Duration.ofMillis(properties.backoffMaxInterval))
+            .build()
+        return RetryTemplate(policy)
+    }
+
     private fun createMistralAiApi(): MistralAiApi {
-        val builder = MistralAiApi.builder().apiKey(apiKey)
         if (!baseUrl.isNullOrBlank()) {
             logger.info("Using custom Mistral AI base URL: {}", baseUrl)
+        }
+
+        // Build the HTTP client from the shared platform builder (aiModelRestClientBuilder /
+        // aiModelWebClientBuilder), like every other model provider, so the platform read/connect timeouts
+        // and the use-reactor-netty opt-out live in one place (NettyClientAutoConfiguration). Clone so adding
+        // the observation registry never mutates the shared singleton. When that bean is absent (e.g. an app
+        // without the netty client autoconfigure), fall back to a builder that still honours the platform read
+        // timeout rather than the ~10s ReactorClientHttpRequestFactory default, which otherwise aborts slow
+        // generations (e.g. reasoning models) with a ReadTimeoutException.
+        val restClientBuilder = restClientBuilderProvider.getIfAvailable(::fallbackRestClientBuilder)
+            .clone()
+            .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
+        val webClientBuilder = webClientBuilderProvider.getIfAvailable(WebClient::builder)
+            .clone()
+            .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
+
+        val builder = MistralAiApi.builder()
+            .apiKey(apiKey)
+            .restClientBuilder(restClientBuilder)
+            .webClientBuilder(webClientBuilder)
+        if (!baseUrl.isNullOrBlank()) {
             builder.baseUrl(baseUrl)
         }
-        // add observation registry to rest and web client builders
-        builder
-            .restClientBuilder(
-                RestClient.builder()
-                    .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
-            )
-        builder
-            .webClientBuilder(
-                WebClient.builder()
-                    .observationRegistry(observationRegistry.getIfUnique { ObservationRegistry.NOOP })
-            )
-
         return builder.build()
+    }
+
+    /**
+     * Fallback client builder for contexts where the shared [aiModelRestClientBuilder] bean is absent.
+     * Applies the platform read timeout ([httpReadTimeout]) so a slow response is not aborted at the
+     * ~10s ReactorClientHttpRequestFactory default.
+     */
+    private fun fallbackRestClientBuilder(): RestClient.Builder {
+        val readTimeout: Duration = DurationStyle.detectAndParse(httpReadTimeout)
+        val requestFactory = JdkClientHttpRequestFactory().apply { setReadTimeout(readTimeout) }
+        return RestClient.builder().requestFactory(requestFactory)
     }
 }
 
-object MistralAiOptionsConverter : OptionsConverter<MistralAiChatOptions> {
+object MistralAiOptionsConverter : OptionsConverter {
 
-    override fun convertOptions(options: LlmOptions): MistralAiChatOptions =
+    override fun convertOptions(options: LlmOptions, model: String): ChatOptions =
         MistralAiChatOptions.builder()
+            .model(model)
             .temperature(options.temperature)
             .topP(options.topP)
             .maxTokens(options.maxTokens)

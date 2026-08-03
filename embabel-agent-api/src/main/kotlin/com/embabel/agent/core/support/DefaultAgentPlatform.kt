@@ -17,6 +17,7 @@ package com.embabel.agent.core.support
 
 import com.embabel.agent.api.channel.OutputChannel
 import com.embabel.agent.api.common.Asyncer
+import com.embabel.agent.api.common.PlatformServices
 import com.embabel.agent.api.event.AgentDeploymentEvent
 import com.embabel.agent.api.event.AgentProcessCreationEvent
 import com.embabel.agent.api.event.AgenticEventListener
@@ -30,7 +31,7 @@ import com.embabel.agent.spi.support.InMemoryAgentProcessRepository
 import com.embabel.agent.spi.support.InMemoryContextRepository
 import com.embabel.agent.spi.support.SpringContextPlatformServices
 import com.embabel.common.textio.template.TemplateRenderer
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.annotation.Qualifier
@@ -73,7 +74,7 @@ open class DefaultAgentPlatform(
 
     private val agents: MutableMap<String, Agent> = ConcurrentHashMap()
 
-    override val platformServices = SpringContextPlatformServices(
+    override val platformServices: PlatformServices = SpringContextPlatformServices(
         llmOperations = llmOperations,
         agentPlatform = this,
         eventListener = eventListener,

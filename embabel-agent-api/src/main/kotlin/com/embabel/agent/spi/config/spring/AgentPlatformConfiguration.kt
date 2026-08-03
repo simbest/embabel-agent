@@ -13,12 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.spi.config.spring
 
 import com.embabel.agent.api.channel.DevNullOutputChannel
 import com.embabel.agent.api.channel.OutputChannel
 import com.embabel.agent.api.common.ranking.Ranker
 import com.embabel.agent.api.event.AgenticEventListener
+import com.embabel.agent.api.event.observation.AgentInstrumentation
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
+import com.embabel.agent.api.event.observation.NoOpAgentInstrumentation
 import com.embabel.agent.core.AgentProcessRepository
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.internal.LlmOperations
@@ -38,7 +43,7 @@ import com.embabel.common.textio.template.JinjavaTemplateRenderer
 import com.embabel.common.textio.template.TemplateRenderer
 import com.embabel.common.util.StringTransformer
 import com.embabel.common.util.loggerFor
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import io.micrometer.observation.ObservationRegistry
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
@@ -47,7 +52,7 @@ import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Primary
-import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder
+import tools.jackson.module.kotlin.jacksonObjectMapper
 
 
 /**
@@ -67,6 +72,15 @@ class AgentPlatformConfiguration(
      */
     @Bean
     fun nameGenerator(): NameGenerator = MobyNameGenerator
+
+    /**
+     * Default no-op instrumentation: the core creates no span unless an observability module
+     * contributes a real [AgentInstrumentation] adapter (registered `@Primary`), which then wins
+     * by-type injection and [org.springframework.beans.factory.ObjectProvider.getIfUnique]. Keeping
+     * this bean unconditional (no `@ConditionalOnMissingBean`) makes resolution order-independent.
+     */
+    @Bean
+    fun agentInstrumentation(): AgentInstrumentation = NoOpAgentInstrumentation
 
     @Bean
     fun toolDecorator(
@@ -105,10 +119,14 @@ class AgentPlatformConfiguration(
     @ConditionalOnMissingBean(ColorPalette::class)
     fun defaultColorPalette(): ColorPalette = DefaultColorPalette()
 
-    @Bean(defaultCandidate = false)
+    @Bean
     @ConditionalOnMissingBean(name = ["embabelJacksonObjectMapper"])
-    fun embabelJacksonObjectMapper(builder: Jackson2ObjectMapperBuilder): ObjectMapper {
-        return builder.createXmlMapper(false).build()
+    fun embabelJacksonObjectMapper(): ObjectMapper {
+        // Jackson 3: build directly via the Kotlin module factory.
+        // Spring Boot 4 dropped Jackson2ObjectMapperBuilder (Jackson 2 type) auto-configuration,
+        // and no longer auto-registers a tools.jackson.databind.ObjectMapper. defaultCandidate=true
+        // (the default) so this bean satisfies generic ObjectMapper autowiring across the app.
+        return jacksonObjectMapper()
     }
 
     @Bean

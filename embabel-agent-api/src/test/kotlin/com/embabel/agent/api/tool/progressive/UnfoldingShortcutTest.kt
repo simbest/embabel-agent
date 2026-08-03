@@ -208,8 +208,8 @@ class UnfoldingShortcutTest {
                     Tool.Parameter.string("priority", "Priority level"),
                 ),
             ) { input ->
-                val parsed = com.fasterxml.jackson.module.kotlin.jacksonObjectMapper().readTree(input)
-                taskName = parsed.get("name")?.asText()
+                val parsed = tools.jackson.module.kotlin.jacksonObjectMapper().readTree(input)
+                taskName = parsed.get("name")?.asString()
                 Tool.Result.text("Task '$taskName' created")
             }
             val listTasks = Tool.of("list_tasks", "List tasks") { Tool.Result.text("No tasks") }

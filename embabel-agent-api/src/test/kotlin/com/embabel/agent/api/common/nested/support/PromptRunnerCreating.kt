@@ -19,7 +19,7 @@ import com.embabel.agent.api.common.CreationExample
 import com.embabel.agent.api.common.PromptRunner
 import com.embabel.chat.Message
 import com.embabel.common.ai.prompt.PromptContributor
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import java.lang.reflect.Field
 import java.util.function.Predicate
 
@@ -54,18 +54,13 @@ internal data class PromptRunnerCreating<T>(
     override fun withPropertyFilter(
         filter: Predicate<String>
     ): PromptRunner.Creating<T> {
-        return copy(
-            promptRunner = promptRunner
-                .withPropertyFilter(filter)
-        )
+        throw UnsupportedOperationException("not implemented")
     }
 
     override fun withValidation(
         validation: Boolean
     ): PromptRunner.Creating<T> {
-        return copy(
-            promptRunner = promptRunner.withValidation(validation)
-        )
+        throw UnsupportedOperationException("not implemented")
     }
 
     override fun fromMessages(

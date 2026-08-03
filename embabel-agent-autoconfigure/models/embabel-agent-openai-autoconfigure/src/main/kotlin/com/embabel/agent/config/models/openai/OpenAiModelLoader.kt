@@ -15,10 +15,13 @@
  */
 package com.embabel.agent.config.models.openai
 
+import com.embabel.agent.api.models.OpenAiModels
 import com.embabel.common.ai.autoconfig.AbstractYamlModelLoader
 import com.embabel.common.ai.autoconfig.LlmAutoConfigMetadata
 import com.embabel.common.ai.autoconfig.LlmAutoConfigProvider
+import com.embabel.common.ai.autoconfig.NativeSupport
 import com.embabel.common.ai.model.PerTokenPricingModel
+import com.fasterxml.jackson.annotation.JsonAlias
 import org.springframework.core.io.DefaultResourceLoader
 import org.springframework.core.io.ResourceLoader
 import java.time.LocalDate
@@ -34,8 +37,17 @@ import java.time.LocalDate
  */
 data class OpenAiModelDefinitions(
     override val models: List<OpenAiModelDefinition> = emptyList(),
-    val embeddingModels: List<OpenAiEmbeddingModelDefinition> = emptyList()
-) : LlmAutoConfigProvider<OpenAiModelDefinition>
+    val embeddingModels: List<OpenAiEmbeddingModelDefinition> = emptyList(),
+    val nativeSupportDefaults: NativeSupport? = null,
+) : LlmAutoConfigProvider<OpenAiModelDefinition> {
+    fun effectiveModels(): List<OpenAiModelDefinition> {
+        return models.map { model ->
+            model.copy(
+                nativeSupport = model.nativeSupport?.merge(nativeSupportDefaults) ?: nativeSupportDefaults,
+            )
+        }
+    }
+}
 
 /**
  * OpenAI-specific LLM model definition.
@@ -52,6 +64,7 @@ data class OpenAiModelDefinitions(
  * @property temperature sampling temperature (default 1.0)
  * @property topP nucleus sampling parameter
  * @property specialHandling optional special handling configuration (e.g., GPT-5 temperature)
+ * @property nativeSupport optional provider-native support metadata
  */
 data class OpenAiModelDefinition(
     override val name: String,
@@ -63,6 +76,8 @@ data class OpenAiModelDefinition(
     val temperature: Double = 1.0,
     val topP: Double? = null,
     val specialHandling: SpecialHandlingConfiguration? = null,
+    @param:JsonAlias("native-support")
+    override val nativeSupport: NativeSupport? = null,
 ) : LlmAutoConfigMetadata
 
 /**
@@ -118,7 +133,7 @@ class OpenAiModelLoader(
 
     override fun createEmptyProvider() = OpenAiModelDefinitions()
 
-    override fun getProviderName() = "OpenAI"
+    override fun getProviderName() = OpenAiModels.PROVIDER
 
     override fun validateModels(provider: OpenAiModelDefinitions) {
         // Validate LLM models

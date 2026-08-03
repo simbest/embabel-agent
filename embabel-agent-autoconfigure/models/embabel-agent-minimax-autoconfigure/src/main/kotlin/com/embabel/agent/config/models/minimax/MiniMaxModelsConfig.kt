@@ -16,6 +16,7 @@
 package com.embabel.agent.config.models.minimax
 
 import com.embabel.agent.api.models.MiniMaxModels
+import com.embabel.agent.config.models.minimax.MiniMaxProperties.Companion.PREFIX
 import com.embabel.agent.openai.OpenAiCompatibleModelFactory
 import com.embabel.agent.spi.LlmService
 import com.embabel.agent.spi.common.RetryProperties
@@ -25,6 +26,7 @@ import com.embabel.common.ai.model.PerTokenPricingModel
 import com.embabel.common.util.ExcludeFromJacocoGeneratedReport
 import com.embabel.common.util.loggerFor
 import io.micrometer.observation.ObservationRegistry
+import org.springframework.ai.chat.prompt.ChatOptions
 import org.springframework.ai.openai.OpenAiChatOptions
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.annotation.Qualifier
@@ -43,7 +45,7 @@ import java.time.LocalDate
  * "embabel.agent.platform.models.minimax" and control retry behavior
  * when calling MiniMax APIs.
  */
-@ConfigurationProperties(prefix = "embabel.agent.platform.models.minimax")
+@ConfigurationProperties(prefix = PREFIX)
 class MiniMaxProperties : RetryProperties {
     /**
      * Base URL for MiniMax API requests.
@@ -74,11 +76,16 @@ class MiniMaxProperties : RetryProperties {
      * Maximum backoff interval (in milliseconds).
      */
     override var backoffMaxInterval: Long = 60000L
+
+    override val propertyPrefix: String = PREFIX
+    companion object {
+        const val PREFIX  = "embabel.agent.platform.models.minimax"
+    }
 }
 
 /**
  * Configuration class for MiniMax models.
- * This class provides beans for MiniMax models (M2.7, M2.7-highspeed)
+ * This class provides beans for MiniMax models (M3, M2.7, M2.7-highspeed)
  * via the OpenAI-compatible API provided by MiniMax.
  *
  * MiniMax models require temperature values in the range (0.0, 1.0].
@@ -122,6 +129,21 @@ class MiniMaxModelsConfig(
     }
 
     @Bean
+    fun miniMaxM3(): LlmService<*> {
+        return openAiCompatibleLlm(
+            model = MiniMaxModels.MINIMAX_M3,
+            provider = MiniMaxModels.PROVIDER,
+            knowledgeCutoffDate = LocalDate.of(2025, 6, 1),
+            optionsConverter = MiniMaxOptionsConverter,
+            pricingModel = PerTokenPricingModel(
+                usdPer1mInputTokens = 0.60,
+                usdPer1mOutputTokens = 2.40,
+            ),
+            retryTemplate = properties.retryTemplate(MiniMaxModels.MINIMAX_M3),
+        )
+    }
+
+    @Bean
     fun miniMaxM27(): LlmService<*> {
         return openAiCompatibleLlm(
             model = MiniMaxModels.MINIMAX_M2_7,
@@ -157,12 +179,12 @@ class MiniMaxModelsConfig(
  * MiniMax requires temperature to be in the range (0.0, 1.0].
  * Values outside this range are clamped accordingly.
  */
-object MiniMaxOptionsConverter : OptionsConverter<OpenAiChatOptions> {
+object MiniMaxOptionsConverter : OptionsConverter {
 
     private const val MIN_TEMPERATURE = 0.01
     private const val MAX_TEMPERATURE = 1.0
 
-    override fun convertOptions(options: LlmOptions): OpenAiChatOptions {
+    override fun convertOptions(options: LlmOptions, model: String): ChatOptions {
         val temperature = options.temperature?.let { temp ->
             temp.coerceIn(MIN_TEMPERATURE, MAX_TEMPERATURE).also { clamped ->
                 if (clamped != temp) {
@@ -174,6 +196,7 @@ object MiniMaxOptionsConverter : OptionsConverter<OpenAiChatOptions> {
             }
         }
         return OpenAiChatOptions.builder()
+            .model(model)
             .temperature(temperature)
             .topP(options.topP)
             .maxTokens(options.maxTokens)

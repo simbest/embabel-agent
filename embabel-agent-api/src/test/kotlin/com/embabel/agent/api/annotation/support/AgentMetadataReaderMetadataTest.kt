@@ -97,6 +97,24 @@ class AgentMetadataReaderMetadataTest {
         }
 
         @Test
+        fun `agent with AchievesGoal actions returning distinct types is rejected when restricted`() {
+            val reader = AgentMetadataReader(restrictedGoals = true)
+            assertNull(
+                reader.createAgentMetadata(AgentWithMultipleAchievesGoalActions()),
+                "@Agent with @AchievesGoal actions returning different types must be rejected when restricted-goals=true (issue #797)",
+            )
+        }
+
+        @Test
+        fun `agent with AchievesGoal actions returning distinct types is allowed by default`() {
+            val reader = AgentMetadataReader()
+            assertNotNull(
+                reader.createAgentMetadata(AgentWithMultipleAchievesGoalActions()),
+                "@Agent with @AchievesGoal actions returning different types must be allowed by default (issue #1771)",
+            )
+        }
+
+        @Test
         fun `OperationContext constructor injection throws IllegalStateException`() {
             val reader = AgentMetadataReader()
             val placeholder = com.embabel.agent.test.integration.IntegrationTestUtils

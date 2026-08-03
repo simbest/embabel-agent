@@ -17,6 +17,7 @@ package com.embabel.agent.spi.support.springai
 
 import com.embabel.chat.AssistantMessage
 import com.embabel.chat.AssistantMessageWithToolCalls
+import com.embabel.chat.DocumentPart
 import com.embabel.chat.ImagePart
 import com.embabel.chat.SystemMessage
 import com.embabel.chat.TextPart
@@ -111,6 +112,83 @@ class MessageConversionTest {
     }
 
     @Test
+    fun `converts UserMessage with document`() {
+        val message = UserMessage(
+            listOf(
+                TextPart("Summarize this document:"),
+                DocumentPart("application/pdf", byteArrayOf(1, 2, 3), "report.pdf")
+            )
+        )
+
+        val springAiMessage = message.toSpringAiMessage() as SpringAiUserMessage
+
+        assertThat(springAiMessage.text).isEqualTo("Summarize this document:")
+        assertThat(springAiMessage.media).hasSize(1)
+        assertThat(springAiMessage.media[0].mimeType.toString()).isEqualTo("application/pdf")
+        assertThat(springAiMessage.media[0].name).isEqualTo("report.pdf")
+        assertThat(springAiMessage.media[0].data).isNotNull()
+    }
+
+    @Test
+    fun `converts UserMessage with only document no text`() {
+        val message = UserMessage(
+            listOf(
+                DocumentPart("application/pdf", byteArrayOf(1, 2, 3), "report.pdf")
+            )
+        )
+
+        val springAiMessage = message.toSpringAiMessage() as SpringAiUserMessage
+
+        assertThat(springAiMessage.text).isEqualTo(" ")
+        assertThat(springAiMessage.media).hasSize(1)
+        assertThat(springAiMessage.media[0].mimeType.toString()).isEqualTo("application/pdf")
+        assertThat(springAiMessage.media[0].name).isEqualTo("report.pdf")
+    }
+
+    @Test
+    fun `converts UserMessage with image and document media`() {
+        val message = UserMessage(
+            listOf(
+                TextPart("Use both inputs:"),
+                ImagePart("image/png", byteArrayOf(1, 2, 3)),
+                DocumentPart(
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    byteArrayOf(4, 5, 6),
+                    "workbook.xlsx"
+                )
+            )
+        )
+
+        val springAiMessage = message.toSpringAiMessage() as SpringAiUserMessage
+
+        assertThat(springAiMessage.text).isEqualTo("Use both inputs:")
+        assertThat(springAiMessage.media).hasSize(2)
+        assertThat(springAiMessage.media[0].mimeType.toString()).isEqualTo("image/png")
+        assertThat(springAiMessage.media[1].mimeType.toString())
+            .isEqualTo("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        assertThat(springAiMessage.media[1].name).isEqualTo("workbook.xlsx")
+    }
+
+    @Test
+    fun `preserves media order when converting mixed image and document parts`() {
+        val message = UserMessage(
+            listOf(
+                DocumentPart("application/pdf", byteArrayOf(1), "first.pdf"),
+                ImagePart("image/png", byteArrayOf(2)),
+                DocumentPart("application/vnd.oasis.opendocument.text", byteArrayOf(3), "third.odt")
+            )
+        )
+
+        val springAiMessage = message.toSpringAiMessage() as SpringAiUserMessage
+
+        assertThat(springAiMessage.media.map { it.mimeType.toString() }).containsExactly(
+            "application/pdf",
+            "image/png",
+            "application/vnd.oasis.opendocument.text",
+        )
+    }
+
+    @Test
     fun `converts UserMessage with only images no text`() {
         val message = UserMessage(
             listOf(
@@ -178,17 +256,28 @@ class MessageConversionTest {
 
         @Test
         fun `converts AssistantMessageWithToolCalls to Spring AI message`() {
+            val thoughtSignatures = listOf(byteArrayOf(1, 2, 3), byteArrayOf(4, 5, 6))
             val message = AssistantMessageWithToolCalls(
                 content = "Let me check that for you",
                 toolCalls = listOf(
                     ToolCall("call-1", "get_weather", """{"location": "NYC"}""")
-                )
+                ),
+                metadata = mapOf("thoughtSignatures" to thoughtSignatures)
             )
 
             val springAiMessage = message.toSpringAiMessage()
 
             assertThat(springAiMessage).isInstanceOf(SpringAiAssistantMessage::class.java)
             assertThat(springAiMessage.text).isEqualTo("Let me check that for you")
+            val metadata = springAiMessage.metadata
+            assertThat(metadata).containsKey("thoughtSignatures")
+            val signatures = metadata["thoughtSignatures"] as? List<*>
+            assertThat(signatures).isNotNull
+            assertThat(signatures).hasSize(2)
+            assertThat(signatures!![0]).isInstanceOf(ByteArray::class.java)
+            assertThat(signatures[1]).isInstanceOf(ByteArray::class.java)
+            assertThat(signatures[0] as ByteArray).containsExactly(1, 2, 3)
+            assertThat(signatures[1] as ByteArray).containsExactly(4, 5, 6)
         }
 
         @Test
@@ -234,7 +323,30 @@ class MessageConversionTest {
 
             assertThat(embabelMessage).isInstanceOf(AssistantMessageWithToolCalls::class.java)
             assertThat(embabelMessage.content).isEmpty()
-            assertThat((embabelMessage as AssistantMessageWithToolCalls).toolCalls).isEmpty()
+            val messageWithCalls = embabelMessage as AssistantMessageWithToolCalls
+            assertThat(messageWithCalls.toolCalls).isEmpty()
+            assertThat(messageWithCalls.metadata["messageType"].toString()).isEqualTo("ASSISTANT")
+        }
+
+        @Test
+        fun `converts Spring AI AssistantMessage thoughtSignatures metadata to Embabel message metadata`() {
+            val thoughtSignatures = listOf(byteArrayOf(10, 20), byteArrayOf(30, 40))
+            val springMessage = SpringAiAssistantMessage.builder()
+                .content("")
+                .properties(mapOf("thoughtSignatures" to thoughtSignatures))
+                .build()
+
+            val embabelMessage = springMessage.toEmbabelMessage()
+
+            assertThat(embabelMessage).isInstanceOf(AssistantMessageWithToolCalls::class.java)
+            val messageWithCalls = embabelMessage as AssistantMessageWithToolCalls
+            val signatures = messageWithCalls.metadata["thoughtSignatures"] as? List<*>
+            assertThat(signatures).isNotNull
+            assertThat(signatures).hasSize(2)
+            assertThat(signatures!![0]).isInstanceOf(ByteArray::class.java)
+            assertThat(signatures[1]).isInstanceOf(ByteArray::class.java)
+            assertThat(signatures[0] as ByteArray).containsExactly(10, 20)
+            assertThat(signatures[1] as ByteArray).containsExactly(30, 40)
         }
 
         @Test
@@ -246,6 +358,7 @@ class MessageConversionTest {
             val springMessage = mockk<SpringAiAssistantMessage> {
                 every { text } returns "Checking..."
                 every { getToolCalls() } returns toolCalls
+                every { metadata } returns emptyMap()
             }
 
             val embabelMessage = springMessage.toEmbabelMessage()
@@ -266,6 +379,7 @@ class MessageConversionTest {
             val springMessage = mockk<SpringAiAssistantMessage> {
                 every { text } returns "No tools"
                 every { getToolCalls() } returns emptyList()
+                every { metadata } returns emptyMap()
             }
 
             val embabelMessage = springMessage.toEmbabelMessage()
@@ -437,6 +551,7 @@ class MessageConversionTest {
             val springMessage = mockk<SpringAiAssistantMessage> {
                 every { text } returns ""  // Empty text - common with Bedrock tool_use
                 every { getToolCalls() } returns toolCalls
+                every { metadata } returns emptyMap()
             }
 
             val embabelMessage = springMessage.toEmbabelMessage()
@@ -463,6 +578,7 @@ class MessageConversionTest {
             val springMessage = mockk<SpringAiAssistantMessage> {
                 every { text } returns null  // Null text - also seen with Bedrock
                 every { getToolCalls() } returns toolCalls
+                every { metadata } returns emptyMap()
             }
 
             val embabelMessage = springMessage.toEmbabelMessage()
@@ -500,6 +616,7 @@ class MessageConversionTest {
             val springMessage = mockk<SpringAiAssistantMessage> {
                 every { text } returns ""
                 every { getToolCalls() } returns toolCalls
+                every { metadata } returns emptyMap()
             }
 
             val embabelMessage = springMessage.toEmbabelMessage()

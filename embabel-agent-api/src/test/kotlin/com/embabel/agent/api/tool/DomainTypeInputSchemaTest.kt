@@ -20,7 +20,7 @@ import com.embabel.agent.core.DomainType
 import com.embabel.agent.core.DomainTypePropertyDefinition
 import com.embabel.agent.core.DynamicType
 import com.embabel.agent.core.ValuePropertyDefinition
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import tools.jackson.module.kotlin.jacksonObjectMapper
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -385,7 +385,7 @@ class DomainTypeInputSchemaTest {
             val jsonSchema = schema.toJsonSchema()
             val parsed = objectMapper.readTree(jsonSchema)
 
-            assertEquals("object", parsed.get("type").asText())
+            assertEquals("object", parsed.get("type").asString())
         }
 
         @Test
@@ -424,10 +424,10 @@ class DomainTypeInputSchemaTest {
             val parsed = objectMapper.readTree(jsonSchema)
             val properties = parsed.get("properties")
 
-            assertEquals("string", properties.get("name").get("type").asText())
-            assertEquals("integer", properties.get("count").get("type").asText())
-            assertEquals("number", properties.get("price").get("type").asText())
-            assertEquals("boolean", properties.get("active").get("type").asText())
+            assertEquals("string", properties.get("name").get("type").asString())
+            assertEquals("integer", properties.get("count").get("type").asString())
+            assertEquals("number", properties.get("price").get("type").asString())
+            assertEquals("boolean", properties.get("active").get("type").asString())
         }
 
         @Test
@@ -447,7 +447,12 @@ class DomainTypeInputSchemaTest {
             assertNotNull(required)
             assertTrue(required.isArray)
 
-            val requiredFields = required.map { it.asText() }
+            // Jackson 3 / victools 5 may produce nested arrays; flatten before extracting strings.
+            val requiredFields = mutableListOf<String>()
+            required.forEach { node ->
+                if (node.isArray) node.forEach { requiredFields.add(it.asString()) }
+                else requiredFields.add(node.asString())
+            }
             assertTrue(requiredFields.contains("requiredField"))
             assertFalse(requiredFields.contains("optionalField"))
         }
@@ -465,11 +470,11 @@ class DomainTypeInputSchemaTest {
             val parsed = objectMapper.readTree(jsonSchema)
             val tagsProperty = parsed.get("properties").get("tags")
 
-            assertEquals("array", tagsProperty.get("type").asText())
+            assertEquals("array", tagsProperty.get("type").asString())
 
             val items = tagsProperty.get("items")
             assertNotNull(items, "Array schema must have 'items' property")
-            assertEquals("string", items.get("type").asText())
+            assertEquals("string", items.get("type").asString())
         }
 
         @Test
@@ -498,7 +503,7 @@ class DomainTypeInputSchemaTest {
             val properties = parsed.get("properties")
 
             val addressProperty = properties.get("address")
-            assertEquals("object", addressProperty.get("type").asText())
+            assertEquals("object", addressProperty.get("type").asString())
 
             val nestedProperties = addressProperty.get("properties")
             assertNotNull(nestedProperties)
@@ -655,7 +660,7 @@ class DomainTypeInputSchemaTest {
             val parsed = objectMapper.readTree(jsonSchema)
 
             val itemsProperty = parsed.get("properties").get("items")
-            assertEquals("array", itemsProperty.get("type").asText())
+            assertEquals("array", itemsProperty.get("type").asString())
 
             val itemsSchema = itemsProperty.get("items")
             assertNotNull(itemsSchema)

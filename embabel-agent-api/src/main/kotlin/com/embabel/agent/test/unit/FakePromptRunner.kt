@@ -115,7 +115,7 @@ data class FakePromptRunner(
         override val templateRenderer: com.embabel.common.textio.template.TemplateRenderer
             get() = context.agentPlatform().platformServices.templateRenderer
 
-        override val objectMapper: com.fasterxml.jackson.databind.ObjectMapper
+        override val objectMapper: tools.jackson.databind.ObjectMapper
             get() = context.agentPlatform().platformServices.objectMapper
 
         override val llm: LlmOptions?
@@ -405,14 +405,6 @@ data class FakePromptRunner(
 
     override fun withGenerateExamples(generateExamples: Boolean): PromptRunner =
         copy(generateExamples = generateExamples)
-
-    @Deprecated("Use creating().withPropertyFilter() instead")
-    override fun withPropertyFilter(filter: Predicate<String>): PromptRunner =
-        copy(fieldFilter = this.fieldFilter.and { filter.test(it.name) })
-
-    @Deprecated("Use creating().withValidation() instead")
-    override fun withValidation(validation: Boolean): PromptRunner =
-        copy(validation = validation)
 
     private fun createLlmInteraction() =
         LlmInteraction(

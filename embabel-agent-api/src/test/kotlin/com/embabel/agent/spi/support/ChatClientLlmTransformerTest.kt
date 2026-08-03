@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.spi.support
 
 import com.embabel.agent.api.common.InteractionId
@@ -20,6 +22,7 @@ import com.embabel.agent.api.common.PlatformServices
 import com.embabel.agent.api.common.ToolsStats
 import com.embabel.agent.api.event.AgenticEventListener
 import com.embabel.agent.api.event.LlmInvocationEvent
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
 import com.embabel.agent.core.Agent
 import com.embabel.agent.core.AgentPlatform
 import com.embabel.agent.core.AgentProcess
@@ -36,7 +39,7 @@ import com.embabel.chat.UserMessage
 import com.embabel.common.ai.model.DefaultOptionsConverter
 import com.embabel.common.ai.model.ModelProvider
 import com.embabel.common.textio.template.JinjavaTemplateRenderer
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import tools.jackson.module.kotlin.jacksonObjectMapper
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -50,7 +53,7 @@ import org.springframework.ai.chat.messages.AssistantMessage
 import org.springframework.ai.chat.model.ChatModel
 import org.springframework.ai.chat.model.ChatResponse
 import org.springframework.ai.chat.model.Generation
-import org.springframework.ai.chat.prompt.DefaultChatOptions
+import org.springframework.ai.chat.prompt.ChatOptions
 import org.springframework.ai.chat.prompt.Prompt
 
 class MutableLlmInvocationHistory : LlmInvocationHistory {
@@ -193,7 +196,7 @@ class ChatClientLlmTransformerTest {
 
             val mockModelProvider = mockk<ModelProvider>()
             val mockChatModel = mockk<ChatModel>()
-            every { mockChatModel.defaultOptions } returns DefaultChatOptions()
+            every { mockChatModel.defaultOptions } returns ChatOptions.builder().build()
             val promptSlot = slot<Prompt>()
             every { mockChatModel.call(capture(promptSlot)) } returns ChatResponse(
                 listOf(
@@ -381,7 +384,7 @@ class ChatClientLlmTransformerTest {
 
             val mockModelProvider = mockk<ModelProvider>()
             val mockChatModel = mockk<ChatModel>()
-            every { mockChatModel.defaultOptions } returns DefaultChatOptions()
+            every { mockChatModel.defaultOptions } returns ChatOptions.builder().build()
             val promptSlot = slot<Prompt>()
             every { mockChatModel.call(capture(promptSlot)) } returns ChatResponse(
                 listOf(

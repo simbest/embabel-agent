@@ -46,8 +46,8 @@ object CommunicateTool {
             Tool.Parameter.string("message", "The message to send to the user"),
         ),
     ) { input ->
-        val parsed = com.fasterxml.jackson.databind.ObjectMapper().readTree(input)
-        val message = parsed.get("message")?.asText()
+        val parsed = tools.jackson.databind.ObjectMapper().readTree(input)
+        val message = parsed.get("message")?.asString()
             ?: return@of Tool.Result.error("Missing 'message' parameter")
 
         val process = AgentProcess.get()

@@ -15,27 +15,31 @@
  */
 package com.embabel.common.ai.converters
 
-import com.fasterxml.jackson.databind.JsonMappingException
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.databind.SerializationFeature
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
-import com.fasterxml.jackson.module.kotlin.KotlinModule
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import tools.jackson.core.JacksonException
+import tools.jackson.databind.cfg.DateTimeFeature
+import tools.jackson.databind.json.JsonMapper
+import tools.jackson.module.kotlin.jacksonObjectMapper
+import tools.jackson.module.kotlin.kotlinModule
+import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.assertThrows
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.Arguments
+import org.junit.jupiter.params.provider.MethodSource
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 
 class JacksonOutputConverterTest {
 
-    private val objectMapper = jacksonObjectMapper().apply {
-        registerModule(JavaTimeModule())
-        disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
-    }
+    private val objectMapper = JsonMapper.builder()
+        .addModule(kotlinModule())
+        .disable(DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS)
+        .build()
 
     data class SimpleObject(
         val name: String,
@@ -74,8 +78,142 @@ class JacksonOutputConverterTest {
         val localDateTime: LocalDateTime,
     )
 
+    data class KotlinRequiredChild(
+        val name: String,
+        val note: String?,
+    )
+
+    data class KotlinRequiredParent(
+        val child: KotlinRequiredChild,
+        val title: String,
+        val optional: String?,
+    )
+
     @Nested
+    inner class SchemaNormalizationTests {
+
+        @Test
+        fun `marks Kotlin non-null properties as required`() {
+            val converter = JacksonOutputConverter(KotlinRequiredParent::class.java, objectMapper)
+            val schema = jacksonObjectMapper().readTree(converter.getJsonSchema())
+
+            assertThat(schema.requiredFieldNames()).containsExactlyInAnyOrder("child", "title")
+            assertThat(schema.path("properties").path("optional").requiredFieldNames()).isEmpty()
+            assertThat(schema.path("properties").path("child").requiredFieldNames()).containsExactlyInAnyOrder("name")
+        }
+
+        @Test
+        fun `can disable required field normalization`() {
+            val converter = JacksonOutputConverter(
+                KotlinRequiredParent::class.java,
+                objectMapper,
+                requiredFieldNormalization = RequiredFieldNormalization.DISABLED,
+            )
+            val schema = jacksonObjectMapper().readTree(converter.getJsonSchema())
+
+            assertThat(schema.requiredFieldNames()).isEmpty()
+            assertThat(schema.path("properties").path("child").requiredFieldNames()).isEmpty()
+        }
+
+        @Test
+        fun `filtering converter can disable required field normalization`() {
+            val converter = FilteringJacksonOutputConverter(
+                clazz = KotlinRequiredParent::class.java,
+                objectMapper = objectMapper,
+                fieldFilter = { true },
+                requiredFieldNormalization = RequiredFieldNormalization.DISABLED,
+            )
+            val schema = jacksonObjectMapper().readTree(converter.getJsonSchema())
+
+            assertThat(schema.requiredFieldNames()).isEmpty()
+            assertThat(schema.path("properties").path("child").requiredFieldNames()).isEmpty()
+        }
+
+        @Test
+        fun `marks Java primitives and annotations as required while leaving plain references optional`() {
+            val javaType = Class.forName("com.embabel.common.ai.converters.JavaStructuredOutputFixtures\$Parent")
+                as Class<Any>
+            val converter = JacksonOutputConverter(javaType, objectMapper)
+            val schema = jacksonObjectMapper().readTree(converter.getJsonSchema())
+
+            assertThat(schema.requiredFieldNames()).containsExactlyInAnyOrder(
+                "primitiveCount",
+                "explicitRequired",
+                "validatedRequired",
+            )
+            assertThat(schema.path("properties").path("optionalText").requiredFieldNames()).isEmpty()
+            assertThat(schema.path("properties").path("child").requiredFieldNamesOrRefResolved(schema))
+                .containsExactlyInAnyOrder("count")
+        }
+    }
+
+    @Nested
+    @TestInstance(TestInstance.Lifecycle.PER_CLASS)
     inner class MalformedEscapedQuotesTests {
+
+        @ParameterizedTest(name = "{0}")
+        @MethodSource("validJson")
+        fun `repair returns valid JSON unchanged`(json: String) {
+            assertEquals(json, fixMalformedEscapedQuotes(json))
+        }
+
+        fun validJson() = listOf(
+            // Repro from #1804
+            """{"title": "Hello \"World\", \"How\" are you?"}""",
+            // Mermaid diagram from #1788
+            """{"name": "flowchart LR\n  a[\"A\"]\n  b[\"B\"]\n  a --> b", "value": 42}""",
+            """["\"A\""]""",
+            """{"name": "test \"quoted\" value", "value": 42}""",
+            """{"name": "ends with \" }", "value": 1}""",
+            """{"items": ["closes \" ]"], "value": 1}""",
+            """{"note": ": \" after colon", "value": 1}""",
+            """{"path": "C:\\temp\\file"}""",
+            // Output truncated mid-string, e.g. at a token limit
+            """{"name": "truncated \"mid""",
+            """{"name": "b""" + "\\",
+        )
+
+        @ParameterizedTest(name = "{0}")
+        @MethodSource("malformedJson")
+        fun `repair rewrites only delimiter quotes`(malformed: String, expected: String) {
+            assertEquals(expected, fixMalformedEscapedQuotes(malformed))
+        }
+
+        fun malformedJson() = listOf(
+            Arguments.of(
+                """{"name": \"test\", "value": 42}""",
+                """{"name": "test", "value": 42}""",
+            ),
+            Arguments.of(
+                """{"value": 42, "name": \"test\"}""",
+                """{"value": 42, "name": "test"}""",
+            ),
+            Arguments.of(
+                """{\"name\": \"test\"}""",
+                """{"name": "test"}""",
+            ),
+            Arguments.of(
+                """{"text": \"User said \"hello\" to Bob\", "confidence": 0.9}""",
+                """{"text": "User said \"hello\" to Bob", "confidence": 0.9}""",
+            ),
+            Arguments.of(
+                "{\"name\": \\\"test\\\"\n}",
+                "{\"name\": \"test\"\n}",
+            ),
+            // Escaped opening quote but plain closing quote
+            Arguments.of(
+                """{"name": \"test"}""",
+                """{"name": "test"}""",
+            ),
+            Arguments.of(
+                """[\"a\", \"b\"]""",
+                """["a", "b"]""",
+            ),
+            Arguments.of(
+                """{"a": \"\", "b": 1}""",
+                """{"a": "", "b": 1}""",
+            ),
+        )
 
         @Test
         fun `parses valid JSON unchanged`() {
@@ -224,6 +362,22 @@ class JacksonOutputConverterTest {
         }
 
         @Test
+        fun `preserves valid escaped quotes inside mermaid diagram`() {
+            val converter = JacksonOutputConverter(SimpleObject::class.java, objectMapper)
+            val validJson = """{
+                    "name": "flowchart LR\n  a[\"A\"]\n  b[\"B\"]\n  a --> b",
+                    "value": 42
+                }""".trimIndent()
+
+            // Jackson can handle the valid JSON without any changes
+            val actual = objectMapper.readValue(validJson, SimpleObject::class.java)
+            assertThat(actual.name).isEqualTo("flowchart LR\n  a[\"A\"]\n  b[\"B\"]\n  a --> b")
+
+            val result = converter.convert(validJson)
+            assertThat(result?.name).isEqualTo("flowchart LR\n  a[\"A\"]\n  b[\"B\"]\n  a --> b")
+        }
+
+        @Test
         fun `handles mixed valid and malformed escapes`() {
             val converter = JacksonOutputConverter(Proposition::class.java, objectMapper)
             // Mix of valid escaped quotes inside string and malformed at delimiters
@@ -369,10 +523,8 @@ World"""
             val messyJson = """{"name":"$name", "value": 42}"""
 
             // Parse the malformed json string without the lenient mapper.
-            val mapper = ObjectMapper().registerModule(
-                KotlinModule.Builder().build()
-            )
-            val exception = assertThrows<JsonMappingException> {
+            val mapper = jacksonObjectMapper()
+            val exception = assertThrows<JacksonException> {
                 mapper.readValue(messyJson, SimpleObject::class.java)
             }
 
@@ -386,6 +538,26 @@ World"""
             assertNotNull(result)
             assertEquals(name, result?.name)
             assertEquals(42, result?.value)
+        }
+    }
+
+    @Nested
+    inner class ParseFailureTests {
+
+        @Test
+        fun `convert throws RuntimeException and logs warn on invalid JSON`() {
+            val converter = JacksonOutputConverter(SimpleObject::class.java, objectMapper)
+            assertThrows<RuntimeException> {
+                converter.convert("this is not json at all")
+            }
+        }
+
+        @Test
+        fun `convert throws RuntimeException on structurally invalid JSON`() {
+            val converter = JacksonOutputConverter(SimpleObject::class.java, objectMapper)
+            assertThrows<RuntimeException> {
+                converter.convert("{ this is completely malformed JSON")
+            }
         }
     }
 
@@ -500,4 +672,19 @@ World"""
             assertEquals("User's preference", result?.propositions?.get(0)?.text)
         }
     }
+}
+
+private fun tools.jackson.databind.JsonNode.requiredFieldNamesOrRefResolved(
+    rootSchema: tools.jackson.databind.JsonNode,
+): Set<String> {
+    val ref = get("\$ref")?.takeIf { it.isString }?.asString()
+    if (ref != null && ref.startsWith("#/")) {
+        val resolved = ref
+            .removePrefix("#/")
+            .split('/')
+            .fold(rootSchema) { current, token -> current.get(token) ?: return emptySet() }
+        return resolved.requiredFieldNames()
+    }
+
+    return requiredFieldNames()
 }

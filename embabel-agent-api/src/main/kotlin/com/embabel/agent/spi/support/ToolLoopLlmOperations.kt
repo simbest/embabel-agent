@@ -13,12 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.spi.support
 
 import com.embabel.agent.api.common.Asyncer
 import com.embabel.agent.api.event.LlmInvocationEvent
 import com.embabel.agent.api.event.LlmRequestEvent
 import com.embabel.agent.api.event.ToolLoopStartEvent
+import com.embabel.agent.api.event.observation.AgentInstrumentation
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
+import com.embabel.agent.api.event.observation.LlmObservationContext
+import com.embabel.agent.api.event.observation.NoOpAgentInstrumentation
+import com.embabel.agent.api.event.observation.ToolLoopObservationContext
 import com.embabel.agent.api.tool.Tool
 import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.api.tool.callback.AfterLlmCallContext
@@ -34,9 +41,18 @@ import com.embabel.agent.spi.LlmService
 import com.embabel.agent.spi.ToolDecorator
 import com.embabel.agent.spi.loop.AutoCorrectionPolicy
 import com.embabel.agent.spi.loop.ChainedToolInjectionStrategy
+import com.embabel.agent.spi.loop.LlmMessageRequest
+import com.embabel.agent.spi.loop.LlmMessageResponse
 import com.embabel.agent.spi.loop.LlmMessageSender
+import com.embabel.agent.spi.loop.NativeStructuredOutputRequest
+import com.embabel.agent.spi.loop.RequestAwareLlmMessageSender
+import com.embabel.agent.spi.loop.StructuredOutputRequest
 import com.embabel.agent.spi.loop.ToolInjectionStrategy
+import com.embabel.agent.spi.loop.ToolLoop
 import com.embabel.agent.spi.loop.ToolLoopFactory
+import com.embabel.agent.spi.loop.ToolLoopResult
+import com.embabel.common.ai.model.NativeStructuredOutputMode
+import com.embabel.common.ai.model.getNativeStructuredOutput
 import com.embabel.agent.spi.support.guardrails.validateAssistantResponse
 import com.embabel.agent.spi.support.guardrails.validateUserInput
 import com.embabel.agent.spi.validation.DefaultValidationPromptGenerator
@@ -53,10 +69,8 @@ import com.embabel.common.core.thinking.ThinkingResponse
 import com.embabel.common.core.thinking.spi.InternalThinkingApi
 import com.embabel.common.core.thinking.spi.extractAllThinkingBlocks
 import com.embabel.common.textio.template.TemplateRenderer
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import io.micrometer.observation.ObservationRegistry
+import tools.jackson.databind.ObjectMapper
+import tools.jackson.module.kotlin.jacksonObjectMapper
 import jakarta.validation.Validator
 import java.time.Duration
 import java.time.Instant
@@ -79,6 +93,12 @@ interface OutputConverter<T> {
      * Returns null if no format instructions are needed (e.g., for String output).
      */
     fun getFormat(): String?
+
+    /**
+     * Get the raw JSON Schema for native structured-output payloads.
+     * This is not prompt text; it is intended for provider adapters.
+     */
+    fun getJsonSchema(): String? = null
 }
 
 /**
@@ -96,7 +116,7 @@ interface OutputConverter<T> {
  * @param autoLlmSelectionCriteriaResolver Resolver for auto LLM selection
  * @param promptsProperties Properties for prompt configuration
  * @param objectMapper ObjectMapper for JSON serialization
- * @param observationRegistry Registry for distributed tracing observations
+ * @param instrumentation Port for direct instrumentation of the LLM and tool-loop spans (no-op by default)
  * @param templateRenderer TemplateRenderer for rendering prompt templates (default: NoOpTemplateRenderer)
  */
 @ThreadSafe
@@ -108,8 +128,8 @@ open class ToolLoopLlmOperations(
     dataBindingProperties: LlmDataBindingProperties = LlmDataBindingProperties(),
     autoLlmSelectionCriteriaResolver: AutoLlmSelectionCriteriaResolver = AutoLlmSelectionCriteriaResolver.DEFAULT,
     promptsProperties: LlmOperationsPromptsProperties = LlmOperationsPromptsProperties(),
-    objectMapper: ObjectMapper = jacksonObjectMapper().registerModule(JavaTimeModule()),
-    protected val observationRegistry: ObservationRegistry = ObservationRegistry.NOOP,
+    objectMapper: ObjectMapper = jacksonObjectMapper(),
+    protected val instrumentation: AgentInstrumentation = NoOpAgentInstrumentation,
     asyncer: Asyncer = ExecutorAsyncer(java.util.concurrent.Executors.newCachedThreadPool()),
     protected val toolLoopFactory: ToolLoopFactory = ToolLoopFactory.create(ToolLoopConfiguration(), asyncer, AutoCorrectionPolicy()),
     protected val templateRenderer: TemplateRenderer = NoOpTemplateRenderer,
@@ -141,6 +161,7 @@ open class ToolLoopLlmOperations(
         } else null
 
         val schemaFormat = converter?.getFormat()
+        val nativeStructuredOutputRequest = nativeStructuredOutputRequest(outputClass, converter, interaction)
 
         val outputParser: (String) -> O = if (outputClass == String::class.java) {
             @Suppress("UNCHECKED_CAST")
@@ -156,7 +177,10 @@ open class ToolLoopLlmOperations(
         val effectiveContext = resolveToolCallContext(llmRequestEvent, interaction)
 
         val toolLoop = toolLoopFactory.create(
-            llmMessageSender = messageSender,
+            llmMessageSender = structuredOutputMessageSender(
+                delegate = messageSender,
+                nativeStructuredOutputRequest = nativeStructuredOutputRequest,
+            ),
             objectMapper = objectMapper,
             injectionStrategy = injectionStrategy,
             maxIterations = interaction.maxToolIterations,
@@ -173,17 +197,19 @@ open class ToolLoopLlmOperations(
         emitCallEvent(llmRequestEvent, promptContributions, messages, schemaFormat)
 
         // Guardrails: Pre-validation of user input
-        val userMessages = messages.filterIsInstance<com.embabel.chat.UserMessage>()
+        val userMessages = messages.filterIsInstance<UserMessage>()
         validateUserInput(userMessages, interaction, llmRequestEvent?.agentProcess?.blackboard)
 
         val tools = interaction.tools
         val toolLoopStartEvent = publishToolLoopStartEvent(llmRequestEvent, tools, interaction, outputClass)
 
-        val result = toolLoop.execute(
-            initialMessages = initialMessages,
-            initialTools = tools,
-            outputParser = outputParser,
-        )
+        val result = toolLoop
+            .instrumented(llmRequestEvent, toolLoopStartEvent)
+            .execute(
+                initialMessages = initialMessages,
+                initialTools = tools,
+                outputParser = outputParser,
+            )
 
         handleToolLoopCompletion(toolLoopStartEvent, result, llmRequestEvent)
 
@@ -226,7 +252,7 @@ open class ToolLoopLlmOperations(
             if (text.isNotBlank()) converter.convert(text)!! else MaybeReturn.noOutput()
         }
 
-        // Create a decorator for dynamically injected tools (e.g., from MatryoshkaTool)
+        // Create a decorator for dynamically injected tools (e.g., from UnfoldingTool)
         val injectedToolDecorator: ((Tool) -> Tool) = { tool: Tool ->
             toolDecorator.decorate(
                 tool = tool,
@@ -276,17 +302,19 @@ open class ToolLoopLlmOperations(
         emitCallEvent(llmRequestEvent, promptContributions, messages, schemaFormat)
 
         // Guardrails: Pre-validation of user input
-        val userMessages = messages.filterIsInstance<com.embabel.chat.UserMessage>()
+        val userMessages = messages.filterIsInstance<UserMessage>()
         validateUserInput(userMessages, interaction, llmRequestEvent.agentProcess.blackboard)
 
         val tools = interaction.tools
         val toolLoopStartEvent = publishToolLoopStartEvent(llmRequestEvent, tools, interaction, outputClass)
 
-        val result = toolLoop.execute(
-            initialMessages = initialMessages,
-            initialTools = tools,
-            outputParser = outputParser,
-        )
+        val result = toolLoop
+            .instrumented(llmRequestEvent, toolLoopStartEvent)
+            .execute(
+                initialMessages = initialMessages,
+                initialTools = tools,
+                outputParser = outputParser,
+            )
 
         handleToolLoopCompletion(toolLoopStartEvent, result, llmRequestEvent)
 
@@ -326,6 +354,7 @@ open class ToolLoopLlmOperations(
         } else null
 
         val schemaFormat = converter?.getFormat()
+        val nativeStructuredOutputRequest = nativeStructuredOutputRequest(outputClass, converter, interaction)
 
         // Output parser that extracts thinking blocks and parses the result
         // For String output: return raw text (with thinking tags preserved)
@@ -354,7 +383,10 @@ open class ToolLoopLlmOperations(
         val effectiveContext = resolveToolCallContext(llmRequestEvent, interaction)
 
         val toolLoop = toolLoopFactory.create(
-            llmMessageSender = messageSender,
+            llmMessageSender = structuredOutputMessageSender(
+                delegate = messageSender,
+                nativeStructuredOutputRequest = nativeStructuredOutputRequest,
+            ),
             objectMapper = objectMapper,
             injectionStrategy = injectionStrategy,
             maxIterations = interaction.maxToolIterations,
@@ -371,17 +403,19 @@ open class ToolLoopLlmOperations(
         emitCallEvent(llmRequestEvent, promptContributions, messages, schemaFormat)
 
         // Guardrails: Pre-validation of user input
-        val userMessages = messages.filterIsInstance<com.embabel.chat.UserMessage>()
+        val userMessages = messages.filterIsInstance<UserMessage>()
         validateUserInput(userMessages, interaction, llmRequestEvent?.agentProcess?.blackboard)
 
         val tools = interaction.tools
         val toolLoopStartEvent = publishToolLoopStartEvent(llmRequestEvent, tools, interaction, outputClass)
 
-        val result = toolLoop.execute(
-            initialMessages = initialMessages,
-            initialTools = tools,
-            outputParser = outputParser,
-        )
+        val result = toolLoop
+            .instrumented(llmRequestEvent, toolLoopStartEvent)
+            .execute(
+                initialMessages = initialMessages,
+                initialTools = tools,
+                outputParser = outputParser,
+            )
 
         handleToolLoopCompletion(toolLoopStartEvent, result, llmRequestEvent)
 
@@ -498,17 +532,19 @@ open class ToolLoopLlmOperations(
             emitCallEvent(llmRequestEvent, promptContributions, messages, schemaFormat)
 
             // Guardrails: Pre-validation of user input
-            val userMessages = messages.filterIsInstance<com.embabel.chat.UserMessage>()
+            val userMessages = messages.filterIsInstance<UserMessage>()
             validateUserInput(userMessages, interaction, llmRequestEvent?.agentProcess?.blackboard)
 
             val tools = interaction.tools
             val toolLoopStartEvent = publishToolLoopStartEvent(llmRequestEvent, tools, interaction, outputClass)
 
-            val result = toolLoop.execute(
-                initialMessages = initialMessages,
-                initialTools = tools,
-                outputParser = outputParser,
-            )
+            val result = toolLoop
+                .instrumented(llmRequestEvent, toolLoopStartEvent)
+                .execute(
+                    initialMessages = initialMessages,
+                    initialTools = tools,
+                    outputParser = outputParser,
+                )
 
             handleToolLoopCompletion(toolLoopStartEvent, result, llmRequestEvent)
 
@@ -570,6 +606,32 @@ open class ToolLoopLlmOperations(
     ): LlmMessageSender {
         return llm.createMessageSender(options)
     }
+
+    private fun structuredOutputMessageSender(
+        delegate: LlmMessageSender,
+        nativeStructuredOutputRequest: NativeStructuredOutputRequest?,
+    ): LlmMessageSender =
+        if (nativeStructuredOutputRequest == null) {
+            delegate
+        } else {
+            StructuredOutputLlmMessageSender(delegate, nativeStructuredOutputRequest)
+        }
+
+    private fun <O> nativeStructuredOutputRequest(
+        outputClass: Class<O>,
+        converter: OutputConverter<O>?,
+        interaction: LlmInteraction,
+    ): NativeStructuredOutputRequest? =
+        converter?.getJsonSchema()?.let { jsonSchema ->
+            NativeStructuredOutputRequest(
+                structuredOutputRequest = StructuredOutputRequest(
+                    name = outputClass.simpleName,
+                    schema = jsonSchema,
+                ),
+                nativeStructuredOutputMode = interaction.llm.getNativeStructuredOutput()
+                    ?: NativeStructuredOutputMode.DEFAULT,
+            )
+        }
 
     /**
      * Create an output converter for the given output class.
@@ -748,7 +810,7 @@ open class ToolLoopLlmOperations(
     // ========== Private helper methods to reduce duplication ==========
 
     /**
-     * Create a decorator for dynamically injected tools (e.g., from MatryoshkaTool).
+     * Create a decorator for dynamically injected tools (e.g., from UnfoldingTool).
      */
     private fun createInjectedToolDecorator(
         llmRequestEvent: LlmRequestEvent<*>?,
@@ -855,7 +917,7 @@ open class ToolLoopLlmOperations(
      */
     private fun <O> handleToolLoopCompletion(
         toolLoopStartEvent: ToolLoopStartEvent?,
-        result: com.embabel.agent.spi.loop.ToolLoopResult<O>,
+        result: ToolLoopResult<O>,
         llmRequestEvent: LlmRequestEvent<*>?,
     ) {
         // Publish ToolLoopCompletedEvent after the tool loop
@@ -916,6 +978,58 @@ open class ToolLoopLlmOperations(
                 )
             } else {
                 finalIterationResult
+            }
+        }
+    }
+
+    /**
+     * Wrap this [ToolLoop] so its execution is observed under the `embabel.llm` span
+     * ([LlmObservationContext]) and the nested `embabel.tool_loop` span
+     * ([ToolLoopObservationContext]). Centralizing the two-span envelope here keeps the span shape
+     * identical across every transform path (doTransform, …IfPossible, …WithThinking,
+     * …WithThinkingIfPossible) instead of each path re-implementing — or forgetting — it.
+     *
+     * Each span is opened only when its driving event is present: the `embabel.llm` span requires an
+     * [llmRequestEvent] (agent-bound call), the `embabel.tool_loop` span a [toolLoopStartEvent]. A naked
+     * call (both null) runs the delegate directly with no observation, exactly as before.
+     */
+    private fun ToolLoop.instrumented(
+        llmRequestEvent: LlmRequestEvent<*>?,
+        toolLoopStartEvent: ToolLoopStartEvent?,
+    ): ToolLoop = InstrumentedToolLoop(this, instrumentation, llmRequestEvent, toolLoopStartEvent)
+
+    /**
+     * Decorator that opens the `embabel.llm` and `embabel.tool_loop` spans around a [ToolLoop]'s
+     * execution. The actual generation content (prompt/completion/tokens) is carried by the nested
+     * Spring AI ChatModel span produced inside [delegate]'s loop, so these spans stay thin structural
+     * wrappers; see [LlmObservationContext]/[ToolLoopObservationContext] and their conventions.
+     */
+    private class InstrumentedToolLoop(
+        private val delegate: ToolLoop,
+        private val instrumentation: AgentInstrumentation,
+        private val llmRequestEvent: LlmRequestEvent<*>?,
+        private val toolLoopStartEvent: ToolLoopStartEvent?,
+    ) : ToolLoop {
+        override fun <O> execute(
+            initialMessages: List<Message>,
+            initialTools: List<Tool>,
+            outputParser: (String) -> O,
+        ): ToolLoopResult<O> {
+            val runLoop = {
+                if (toolLoopStartEvent == null) {
+                    delegate.execute(initialMessages, initialTools, outputParser)
+                } else {
+                    val toolLoopContext = ToolLoopObservationContext(toolLoopStartEvent, initialMessages)
+                    instrumentation.observe({ toolLoopContext }) {
+                        delegate.execute(initialMessages, initialTools, outputParser)
+                            .also { toolLoopContext.output = it }
+                    }
+                }
+            }
+            return if (llmRequestEvent == null) {
+                runLoop()
+            } else {
+                instrumentation.observe({ LlmObservationContext(llmRequestEvent) }) { runLoop() }
             }
         }
     }

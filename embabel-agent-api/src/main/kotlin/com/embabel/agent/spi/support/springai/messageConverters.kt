@@ -50,6 +50,7 @@ fun Message.toSpringAiMessage(
             SpringAiAssistantMessage.builder()
                 .content(this.content)
                 .toolCalls(springToolCalls)
+                .properties(metadata + this.metadata)
                 .build()
         }
 
@@ -73,14 +74,20 @@ fun Message.toSpringAiMessage(
             val builder = SpringAiUserMessage.builder()
 
             // Collect all media (Spring AI UserMessage.Builder.media() takes a List<Media>)
-            val mediaList = this.parts.filterIsInstance<ImagePart>().map { imagePart ->
+            val mediaList = this.parts.filterIsInstance<MediaPart>().map { mediaPart ->
                 try {
-                    val mimeType = MimeTypeUtils.parseMimeType(imagePart.mimeType)
-                    val resource = ByteArrayResource(imagePart.data)
-                    Media(mimeType, resource)
+                    val mimeType = MimeTypeUtils.parseMimeType(mediaPart.mimeType)
+                    val resource = ByteArrayResource(mediaPart.data)
+                    val builder = Media.builder()
+                        .mimeType(mimeType)
+                        .data(resource)
+                    if (mediaPart is DocumentPart && mediaPart.filename != null) {
+                        builder.name(mediaPart.filename)
+                    }
+                    builder.build()
                 } catch (e: Exception) {
                     throw IllegalArgumentException(
-                        "Failed to process image part with MIME type: ${imagePart.mimeType}", e
+                        "Failed to process media part with MIME type: ${mediaPart.mimeType}", e
                     )
                 }
             }
@@ -131,22 +138,28 @@ internal fun List<SpringAiMessage>.mergeConsecutiveToolResponses(): List<SpringA
 /**
  * Convert a Spring AI AssistantMessage to an Embabel message.
  * Handles both regular messages and messages with tool calls.
+ *
+ * Preserves assistant metadata during conversion of messages with tool calls.
+ * Example metadata includes `thoughtSignatures=List<ByteArray>` when
+ * returned by providers such as Google GenAI.
  */
 fun SpringAiAssistantMessage.toEmbabelMessage(): Message {
     val toolCalls = this.toolCalls
     val content = this.text ?: ""
+    val metadata = this.metadata ?: emptyMap()
     return if (toolCalls.isNullOrEmpty()) {
         // AssistantMessage requires non-empty content (TextPart validation).
         // For empty content, use AssistantMessageWithToolCalls which handles empty content gracefully.
         if (content.isEmpty()) {
-            AssistantMessageWithToolCalls(content = "", toolCalls = emptyList())
+            AssistantMessageWithToolCalls(content = "", toolCalls = emptyList(), metadata = metadata)
         } else {
             AssistantMessage(content = content)
         }
     } else {
         AssistantMessageWithToolCalls(
             content = content,
-            toolCalls = toolCalls.map { ToolCall(it.id(), it.name(), it.arguments()) }
+            toolCalls = toolCalls.map { ToolCall(it.id(), it.name(), it.arguments()) },
+            metadata = metadata
         )
     }
 }

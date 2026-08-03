@@ -16,6 +16,8 @@
 package com.embabel.agent.spi.support.springai
 
 import com.embabel.agent.spi.support.springai.streaming.SpringAiLlmMessageStreamer
+import com.embabel.common.ai.autoconfig.NativeStructuredOutputCapability
+import com.embabel.common.ai.autoconfig.NativeSupport
 import com.embabel.common.ai.model.DefaultOptionsConverter
 import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.ai.model.OptionsConverter
@@ -28,6 +30,7 @@ import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.springframework.ai.chat.model.ChatModel
 import org.springframework.ai.chat.prompt.ChatOptions
+import org.springframework.ai.model.tool.ToolCallingChatOptions
 import java.time.LocalDate
 
 class SpringAiLlmServiceTest {
@@ -78,6 +81,37 @@ class SpringAiLlmServiceTest {
             assertThat(service.knowledgeCutoffDate).isEqualTo(cutoffDate)
             assertThat(service.promptContributors).hasSize(1)
             assertThat(service.pricingModel).isEqualTo(pricingModel)
+        }
+
+        @Test
+        fun `creates service with native support metadata`() {
+            val nativeSupport = NativeSupport(
+                structuredOutput = NativeStructuredOutputCapability(
+                    supported = true,
+                    strategy = "response_format",
+                )
+            )
+
+            val service = SpringAiLlmService(
+                name = "native-model",
+                provider = "Provider",
+                chatModel = mockChatModel,
+                nativeSupport = nativeSupport,
+            )
+
+            assertThat(service.nativeSupport).isEqualTo(nativeSupport)
+        }
+
+        @Test
+        fun `creates service with thinking capability`() {
+            val service = SpringAiLlmService(
+                name = "thinking-model",
+                provider = "Provider",
+                chatModel = mockChatModel,
+                thinkingSupported = true,
+            )
+
+            assertThat(service.supportsThinking()).isTrue()
         }
 
         @Test
@@ -204,8 +238,8 @@ class SpringAiLlmServiceTest {
                 provider = "Provider",
                 chatModel = mockChatModel,
             )
-            val customConverter = object : OptionsConverter<ChatOptions> {
-                override fun convertOptions(options: LlmOptions): ChatOptions = mockk()
+            val customConverter = object : OptionsConverter {
+                override fun convertOptions(options: LlmOptions, model: String): ChatOptions = mockk()
             }
 
             val updated = original.withOptionsConverter(customConverter)
@@ -213,6 +247,45 @@ class SpringAiLlmServiceTest {
             assertThat(updated).isNotSameAs(original)
             assertThat(updated.optionsConverter).isEqualTo(customConverter)
             assertThat(original.optionsConverter).isEqualTo(DefaultOptionsConverter)
+        }
+    }
+
+    @Nested
+    inner class ConvertOptionsTests {
+
+        @Test
+        fun `convertOptions stamps service name as model`() {
+            val service = SpringAiLlmService(
+                name = "my-model",
+                provider = "Provider",
+                chatModel = mockChatModel,
+            )
+            assertThat(service.convertOptions(LlmOptions()).model).isEqualTo("my-model")
+        }
+
+        @Test
+        fun `convertOptions overrides converter default model with service name`() {
+            val service = SpringAiLlmService(
+                name = "my-model",
+                provider = "Provider",
+                chatModel = mockChatModel,
+            )
+            val result = service.convertOptions(LlmOptions())
+            assertThat(result.model).isEqualTo("my-model")
+            assertThat(result.model).isNotEqualTo("some-default-model")
+        }
+
+        @Test
+        fun `convertOptions preserves converter fields alongside model`() {
+            val service = SpringAiLlmService(
+                name = "my-model",
+                provider = "Provider",
+                chatModel = mockChatModel,
+            )
+            val result = service.convertOptions(LlmOptions().withTemperature(0.5).withMaxTokens(100))
+            assertThat(result.model).isEqualTo("my-model")
+            assertThat(result.temperature).isEqualTo(0.5)
+            assertThat(result.maxTokens).isEqualTo(100)
         }
     }
 
@@ -236,10 +309,10 @@ class SpringAiLlmServiceTest {
         @Test
         fun `createMessageSender uses optionsConverter`() {
             var converterCalled = false
-            val customConverter = object : OptionsConverter<ChatOptions> {
-                override fun convertOptions(options: LlmOptions): ChatOptions {
+            val customConverter = object : OptionsConverter {
+                override fun convertOptions(options: LlmOptions, model: String): ChatOptions {
                     converterCalled = true
-                    return mockk()
+                    return ToolCallingChatOptions.builder().model(model).build()
                 }
             }
             val service = SpringAiLlmService(
@@ -258,7 +331,7 @@ class SpringAiLlmServiceTest {
     @Nested
     inner class CreateMessageStreamerTests {
 
-        // Relaxed mock needed because ChatClient.create() calls chatModel.getDefaultOptions()
+        // Relaxed mock needed because ChatClient.create() calls chatModel.getOptions()
         private val relaxedChatModel: ChatModel = mockk(relaxed = true)
 
         @Test
@@ -278,10 +351,10 @@ class SpringAiLlmServiceTest {
         @Test
         fun `createMessageStreamer uses optionsConverter`() {
             var converterCalled = false
-            val customConverter = object : OptionsConverter<ChatOptions> {
-                override fun convertOptions(options: LlmOptions): ChatOptions {
+            val customConverter = object : OptionsConverter {
+                override fun convertOptions(options: LlmOptions, model: String): ChatOptions {
                     converterCalled = true
-                    return mockk()
+                    return ToolCallingChatOptions.builder().model(model).build()
                 }
             }
             val service = SpringAiLlmService(
@@ -364,8 +437,8 @@ class SpringAiLlmServiceTest {
             val contributor = object : PromptContributor {
                 override fun contribution() = "Contribution"
             }
-            val customConverter = object : OptionsConverter<ChatOptions> {
-                override fun convertOptions(options: LlmOptions): ChatOptions = mockk()
+            val customConverter = object : OptionsConverter {
+                override fun convertOptions(options: LlmOptions, model: String): ChatOptions = mockk()
             }
 
             val service = SpringAiLlmService(

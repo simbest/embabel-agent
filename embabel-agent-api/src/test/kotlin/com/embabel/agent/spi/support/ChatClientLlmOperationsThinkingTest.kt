@@ -13,11 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.spi.support
 
 import com.embabel.agent.api.common.InteractionId
 import com.embabel.agent.api.event.LlmRequestEvent
 import com.embabel.agent.api.event.LlmResponseEvent
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
 import com.embabel.agent.api.validation.guardrails.AssistantMessageGuardRail
 import com.embabel.agent.api.validation.guardrails.UserInputGuardRail
 import com.embabel.agent.core.AgentProcess
@@ -41,8 +44,7 @@ import com.embabel.common.core.thinking.ThinkingResponse
 import org.junit.jupiter.api.Nested
 import com.embabel.common.core.validation.ValidationResult
 import com.embabel.common.textio.template.JinjavaTemplateRenderer
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import tools.jackson.module.kotlin.jacksonObjectMapper
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -115,7 +117,7 @@ class ChatClientLlmOperationsThinkingTest {
             validator = Validation.buildDefaultValidatorFactory().validator,
             validationPromptGenerator = DefaultValidationPromptGenerator(),
             templateRenderer = JinjavaTemplateRenderer(),
-            objectMapper = jacksonObjectMapper().registerModule(JavaTimeModule()),
+            objectMapper = jacksonObjectMapper(),
             dataBindingProperties = dataBindingProperties,
             asyncer = ExecutorAsyncer(java.util.concurrent.Executors.newCachedThreadPool()),
         )
@@ -262,12 +264,16 @@ class ChatClientLlmOperationsThinkingTest {
                 llmRequestEvent = null
             )
         } catch (e: Exception) {
-            // Expected - malformed JSON should cause parsing exception
+            // Expected - malformed JSON should cause parsing exception.
+            // Jackson 3 wording differs (e.g. "StreamReadException", "Unexpected character", "Invalid LLM return").
             assertTrue("Exception should be related to parsing: ${e.message}") {
                 val message = e.message ?: ""
                 message.contains("parsing", ignoreCase = true) ||
                         message.contains("format", ignoreCase = true) ||
-                        message.contains("JsonParseException", ignoreCase = true)
+                        message.contains("JsonParseException", ignoreCase = true) ||
+                        message.contains("StreamReadException", ignoreCase = true) ||
+                        message.contains("Unexpected character", ignoreCase = true) ||
+                        message.contains("Invalid LLM return", ignoreCase = true)
             }
         }
     }
@@ -714,7 +720,7 @@ class ChatClientLlmOperationsThinkingTest {
         testHandleFutureException(
             exception = TimeoutException("Test timeout"),
             interactionId = "timeout-test",
-            expectedMessageContains = "timed out after 5000ms"
+            expectedMessageContains = "timed out after 5,000ms"
         )
     }
 

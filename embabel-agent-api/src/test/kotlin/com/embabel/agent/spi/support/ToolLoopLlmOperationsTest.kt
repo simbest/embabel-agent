@@ -13,12 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.spi.support
 
 import com.embabel.agent.api.common.InteractionId
 import com.embabel.agent.api.event.LlmInvocationEvent
 import com.embabel.agent.api.event.LlmRequestEvent
+import com.embabel.agent.api.event.observation.AgentInstrumentation
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
+import com.embabel.agent.api.event.observation.LlmObservationContext
+import com.embabel.agent.api.event.observation.NoOpAgentInstrumentation
+import com.embabel.agent.api.event.observation.ToolLoopObservationContext
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.config.ToolLoopConfiguration
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.Blackboard
 import com.embabel.agent.core.ProcessContext
@@ -29,8 +37,14 @@ import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.spi.AutoLlmSelectionCriteriaResolver
 import com.embabel.agent.spi.LlmService
 import com.embabel.agent.spi.ToolDecorator
+import com.embabel.agent.spi.loop.AutoCorrectionPolicy
+import com.embabel.agent.spi.loop.LlmMessageRequest
 import com.embabel.agent.spi.loop.LlmMessageResponse
 import com.embabel.agent.spi.loop.LlmMessageSender
+import com.embabel.agent.spi.loop.NativeStructuredOutputRequest
+import com.embabel.agent.spi.loop.RequestAwareLlmMessageSender
+import com.embabel.agent.spi.loop.StructuredOutputRequest
+import com.embabel.agent.spi.loop.ToolLoopFactory
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
 import com.embabel.agent.spi.validation.DefaultValidationPromptGenerator
 import com.embabel.agent.support.SimpleTestAgent
@@ -45,12 +59,14 @@ import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.ai.model.ModelProvider
 import com.embabel.common.ai.model.ModelSelectionCriteria
 import com.embabel.common.ai.model.PreResolvedModelSelectionCriteria
+import com.embabel.common.ai.model.NativeStructuredOutputMode
+import com.embabel.common.ai.model.withNativeStructuredOutput
 import com.embabel.common.core.thinking.ThinkingResponse
 import com.embabel.common.textio.template.JinjavaTemplateRenderer
 import com.embabel.common.textio.template.TemplateRenderer
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import tools.jackson.databind.ObjectMapper
+import tools.jackson.module.kotlin.jacksonObjectMapper
+import io.micrometer.observation.Observation
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -74,7 +90,7 @@ class ToolLoopLlmOperationsTest {
     private lateinit var mockProcessContext: ProcessContext
     private lateinit var eventListener: EventSavingAgenticEventListener
     private lateinit var mutableLlmInvocationHistory: MutableLlmInvocationHistory
-    private val objectMapper: ObjectMapper = jacksonObjectMapper().registerModule(JavaTimeModule())
+    private val objectMapper: ObjectMapper = jacksonObjectMapper()
 
     @BeforeEach
     fun setup() {
@@ -106,6 +122,12 @@ class ToolLoopLlmOperationsTest {
         messageSender: LlmMessageSender,
         outputConverter: OutputConverter<*>? = null,
         maybeReturnConverter: OutputConverter<MaybeReturn<*>>? = null,
+        toolLoopFactory: ToolLoopFactory = ToolLoopFactory.create(
+            ToolLoopConfiguration(),
+            ExecutorAsyncer(java.util.concurrent.Executors.newCachedThreadPool()),
+            AutoCorrectionPolicy(),
+        ),
+        instrumentation: AgentInstrumentation = NoOpAgentInstrumentation,
     ): TestableToolLoopLlmOperations {
         val fakeChatModel = FakeChatModel("unused")
         val fakeLlm = SpringAiLlmService("test", "provider", fakeChatModel, DefaultOptionsConverter)
@@ -119,6 +141,8 @@ class ToolLoopLlmOperationsTest {
             messageSender = messageSender,
             outputConverter = outputConverter,
             maybeReturnConverter = maybeReturnConverter,
+            toolLoopFactory = toolLoopFactory,
+            instrumentation = instrumentation,
         )
     }
 
@@ -140,13 +164,118 @@ class ToolLoopLlmOperationsTest {
                         MaybeReturn(success = successValue)
                     }
                     tree.has("failure") -> {
-                        MaybeReturn(failure = tree.get("failure").asText())
+                        MaybeReturn(failure = tree.get("failure").asString())
                     }
                     else -> null
                 }
             }
             override fun getFormat(): String = "Return JSON with 'success' or 'failure' field"
         } as OutputConverter<MaybeReturn<*>>
+    }
+
+    /**
+     * Every public transform path must produce the same span shape: an `embabel.llm` span
+     * ([LlmObservationContext]) wrapping an `embabel.tool_loop` span ([ToolLoopObservationContext]).
+     * Originally only [ToolLoopLlmOperations.doTransform] was instrumented; the thinking / if-possible
+     * variants produced no spans, so trace shape silently depended on the variant called (#gap).
+     */
+    @Nested
+    inner class InstrumentationParityTests {
+
+        /** Captures the context type of every observation opened by the operations. */
+        private inner class RecordingInstrumentation : AgentInstrumentation {
+            val contexts = mutableListOf<Observation.Context>()
+            override fun <T> observe(context: () -> Observation.Context, work: () -> T): T {
+                contexts.add(context())
+                return work()
+            }
+        }
+
+        private fun recordingLlmRequestEvent(): LlmRequestEvent<String> {
+            val event = mockk<LlmRequestEvent<String>>(relaxed = true)
+            every { event.agentProcess } returns mockAgentProcess
+            every { event.interaction } returns createInteraction()
+            return event
+        }
+
+        private fun RecordingInstrumentation.assertBothSpans() {
+            assertTrue(contexts.any { it is LlmObservationContext }, "embabel.llm span missing")
+            assertTrue(contexts.any { it is ToolLoopObservationContext }, "embabel.tool_loop span missing")
+        }
+
+        @Test
+        fun `doTransform opens both llm and tool-loop spans`() {
+            val recording = RecordingInstrumentation()
+            val operations = createTestableOperations(
+                TestLlmMessageSender(responses = listOf(textResponse("hi"))),
+                instrumentation = recording,
+            )
+
+            operations.testDoTransformWithEvent(
+                messages = listOf(UserMessage("go")),
+                interaction = createInteraction(),
+                outputClass = String::class.java,
+                llmRequestEvent = recordingLlmRequestEvent(),
+            )
+
+            recording.assertBothSpans()
+        }
+
+        @Test
+        fun `doTransformIfPossible opens both llm and tool-loop spans`() {
+            val recording = RecordingInstrumentation()
+            val operations = createTestableOperations(
+                TestLlmMessageSender(responses = listOf(textResponse("""{"success":"ok"}"""))),
+                maybeReturnConverter = createMaybeReturnConverter(String::class.java),
+                instrumentation = recording,
+            )
+
+            operations.testDoTransformIfPossibleWithEvent(
+                messages = listOf(UserMessage("go")),
+                interaction = createInteraction(),
+                outputClass = String::class.java,
+                llmRequestEvent = recordingLlmRequestEvent(),
+            )
+
+            recording.assertBothSpans()
+        }
+
+        @Test
+        fun `doTransformWithThinking opens both llm and tool-loop spans`() {
+            val recording = RecordingInstrumentation()
+            val operations = createTestableOperations(
+                TestLlmMessageSender(responses = listOf(textResponse("hi"))),
+                instrumentation = recording,
+            )
+
+            operations.testDoTransformWithThinkingWithEvent(
+                messages = listOf(UserMessage("go")),
+                interaction = createInteraction(),
+                outputClass = String::class.java,
+                llmRequestEvent = recordingLlmRequestEvent(),
+            )
+
+            recording.assertBothSpans()
+        }
+
+        @Test
+        fun `doTransformWithThinkingIfPossible opens both llm and tool-loop spans`() {
+            val recording = RecordingInstrumentation()
+            val operations = createTestableOperations(
+                TestLlmMessageSender(responses = listOf(textResponse("""{"success":"ok"}"""))),
+                maybeReturnConverter = createMaybeReturnConverter(String::class.java),
+                instrumentation = recording,
+            )
+
+            operations.testDoTransformWithThinkingIfPossibleWithEvent(
+                messages = listOf(UserMessage("go")),
+                interaction = createInteraction(),
+                outputClass = String::class.java,
+                llmRequestEvent = recordingLlmRequestEvent(),
+            ).getOrThrow()
+
+            recording.assertBothSpans()
+        }
     }
 
     @Nested
@@ -461,6 +590,157 @@ class ToolLoopLlmOperationsTest {
             assertEquals("Tool executed successfully", result.getOrNull())
             assertEquals(1, toolCalled.size)
             assertEquals("""{"param": "value"}""", toolCalled[0])
+        }
+    }
+
+    @Nested
+    inner class StructuredOutputRequestTests {
+
+        @Test
+        fun `doTransform sends converter schema to request-aware message sender`() {
+            data class StructuredResult(val value: String)
+
+            val schema = """{"type":"object","properties":{"value":{"type":"string"}}}"""
+            val converter = object : OutputConverter<StructuredResult> {
+                override fun convert(source: String): StructuredResult = StructuredResult(source)
+                override fun getFormat(): String = "Return a structured result"
+                override fun getJsonSchema(): String = schema
+            }
+            val messageSender = CapturingRequestAwareMessageSender(
+                response = textResponse("captured"),
+            )
+            val operations = createTestableOperations(
+                messageSender = messageSender,
+                outputConverter = converter,
+            )
+
+            val result = operations.testDoTransform(
+                messages = listOf(UserMessage("Get structured output")),
+                interaction = createInteraction(),
+                outputClass = StructuredResult::class.java,
+            )
+
+            assertEquals("captured", result.value)
+            assertEquals(
+                NativeStructuredOutputRequest(
+                    structuredOutputRequest = StructuredOutputRequest(
+                        name = StructuredResult::class.java.simpleName,
+                        schema = schema,
+                    ),
+                ),
+                messageSender.lastRequest?.nativeStructuredOutputRequest,
+            )
+        }
+
+        @Test
+        fun `doTransformIfPossible sends MaybeReturn converter schema to request-aware message sender`() {
+            val schema = """{"type":"object","properties":{"success":{"type":"string"},"failure":{"type":"string"}}}"""
+            val converter = object : OutputConverter<MaybeReturn<String>> {
+                override fun convert(source: String): MaybeReturn<String> = MaybeReturn(success = "captured")
+                override fun getFormat(): String = "Return MaybeReturn"
+                override fun getJsonSchema(): String = schema
+            }
+            val messageSender = CapturingRequestAwareMessageSender(
+                response = textResponse("""{"success":"captured"}"""),
+            )
+            @Suppress("UNCHECKED_CAST")
+            val operations = createTestableOperations(
+                messageSender = messageSender,
+                maybeReturnConverter = converter as OutputConverter<MaybeReturn<*>>,
+            )
+
+            val result = operations.testDoTransformIfPossible(
+                messages = listOf(UserMessage("Try structured output")),
+                interaction = createInteraction(
+                    llm = LlmOptions().withNativeStructuredOutput(NativeStructuredOutputMode.ENABLED),
+                ),
+                outputClass = String::class.java,
+            )
+
+            assertTrue(result.isSuccess)
+            assertEquals("captured", result.getOrNull())
+            assertEquals(null, messageSender.lastRequest)
+        }
+
+        @Test
+        fun `doTransform sends structured output request through parallel tool loop`() {
+            data class StructuredResult(val value: String)
+
+            val schema = """{"type":"object","properties":{"value":{"type":"string"}}}"""
+            val converter = object : OutputConverter<StructuredResult> {
+                override fun convert(source: String): StructuredResult = StructuredResult(source)
+                override fun getFormat(): String = "Return a structured result"
+                override fun getJsonSchema(): String = schema
+            }
+            val messageSender = CapturingRequestAwareMessageSender(
+                response = textResponse("captured"),
+            )
+            val parallelToolLoopFactory = ToolLoopFactory.create(
+                ToolLoopConfiguration(type = ToolLoopConfiguration.ToolLoopType.PARALLEL),
+                ExecutorAsyncer(java.util.concurrent.Executors.newCachedThreadPool()),
+                AutoCorrectionPolicy(),
+            )
+            val operations = createTestableOperations(
+                messageSender = messageSender,
+                outputConverter = converter,
+                toolLoopFactory = parallelToolLoopFactory,
+            )
+
+            val result = operations.testDoTransform(
+                messages = listOf(UserMessage("Get structured output")),
+                interaction = createInteraction(),
+                outputClass = StructuredResult::class.java,
+            )
+
+            assertEquals("captured", result.value)
+            assertEquals(
+                NativeStructuredOutputRequest(
+                    structuredOutputRequest = StructuredOutputRequest(
+                        name = StructuredResult::class.java.simpleName,
+                        schema = schema,
+                    ),
+                ),
+                messageSender.lastRequest?.nativeStructuredOutputRequest,
+            )
+        }
+
+        @Test
+        fun `doTransform propagates native structured output mode to request-aware sender`() {
+            data class StructuredResult(val value: String)
+
+            val schema = """{"type":"object","properties":{"value":{"type":"string"}}}"""
+            val converter = object : OutputConverter<StructuredResult> {
+                override fun convert(source: String): StructuredResult = StructuredResult(source)
+                override fun getFormat(): String = "Return a structured result"
+                override fun getJsonSchema(): String = schema
+            }
+            val messageSender = CapturingRequestAwareMessageSender(
+                response = textResponse("captured"),
+            )
+            val operations = createTestableOperations(
+                messageSender = messageSender,
+                outputConverter = converter,
+            )
+
+            val result = operations.testDoTransform(
+                messages = listOf(UserMessage("Get structured output")),
+                interaction = createInteraction(
+                    llm = LlmOptions().withNativeStructuredOutput(NativeStructuredOutputMode.ENABLED),
+                ),
+                outputClass = StructuredResult::class.java,
+            )
+
+            assertEquals("captured", result.value)
+            assertEquals(
+                NativeStructuredOutputRequest(
+                    structuredOutputRequest = StructuredOutputRequest(
+                        name = StructuredResult::class.java.simpleName,
+                        schema = schema,
+                    ),
+                    nativeStructuredOutputMode = NativeStructuredOutputMode.ENABLED,
+                ),
+                messageSender.lastRequest?.nativeStructuredOutputRequest,
+            )
         }
     }
 
@@ -1757,11 +2037,12 @@ class ToolLoopLlmOperationsTest {
 
     private fun createInteraction(
         tools: List<Tool> = emptyList(),
+        llm: LlmOptions = LlmOptions(),
     ): LlmInteraction {
         return LlmInteraction(
             id = InteractionId("test-interaction"),
             tools = tools,
-            llm = LlmOptions(),
+            llm = llm,
         )
     }
 
@@ -1799,6 +2080,12 @@ internal open class TestableToolLoopLlmOperations(
     private val outputConverter: OutputConverter<*>?,
     private val maybeReturnConverter: OutputConverter<MaybeReturn<*>>? = null,
     templateRenderer: TemplateRenderer = JinjavaTemplateRenderer(),
+    toolLoopFactory: ToolLoopFactory = ToolLoopFactory.create(
+        ToolLoopConfiguration(),
+        ExecutorAsyncer(java.util.concurrent.Executors.newCachedThreadPool()),
+        AutoCorrectionPolicy(),
+    ),
+    instrumentation: AgentInstrumentation = NoOpAgentInstrumentation,
 ) : ToolLoopLlmOperations(
     modelProvider = modelProvider,
     toolDecorator = toolDecorator,
@@ -1808,7 +2095,9 @@ internal open class TestableToolLoopLlmOperations(
     autoLlmSelectionCriteriaResolver = AutoLlmSelectionCriteriaResolver.DEFAULT,
     promptsProperties = LlmOperationsPromptsProperties(),
     objectMapper = objectMapper,
+    instrumentation = instrumentation,
     templateRenderer = templateRenderer,
+    toolLoopFactory = toolLoopFactory,
 ) {
 
     override fun createMessageSender(llm: LlmService<*>, options: LlmOptions, llmRequestEvent: LlmRequestEvent<*>?): LlmMessageSender {
@@ -1981,5 +2270,25 @@ internal class TestLlmMessageSender(
             throw IllegalStateException("TestLlmMessageSender ran out of responses at call $callIndex")
         }
         return responses[callIndex++]
+    }
+}
+
+private class CapturingRequestAwareMessageSender(
+    private val response: LlmMessageResponse,
+) : RequestAwareLlmMessageSender {
+
+    var lastRequest: LlmMessageRequest? = null
+        private set
+
+    override fun call(request: LlmMessageRequest): LlmMessageResponse {
+        lastRequest = request
+        return response
+    }
+
+    override fun call(
+        messages: List<Message>,
+        tools: List<Tool>,
+    ): LlmMessageResponse {
+        return response
     }
 }
